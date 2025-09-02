@@ -528,75 +528,88 @@ class PIPGui(QWidget):
             self.progress_bar.setValue(self.current_index)
             self.progress_label.setText(f"Reprocess: {self.current_index}/{len(self.image_list)}")
 
-    # 保存（OK）処理
-    def mark_ok_and_next(self):
-        if not self.btn_ok.isEnabled():
-            return
-        if not hasattr(self, '_last_processing'):
-            return
-        info = self._last_processing
-        path = info['path']
-        overlay = info['overlay_bgr']
-        features = info['particle_features']
+    # 保存（OK）処理def mark_ok_and_next(self):
+    if not self.btn_ok.isEnabled():
+        return
+    if not hasattr(self, '_last_processing'):
+        return
+    info = self._last_processing
+    path = info['path']
+    overlay = info['overlay_bgr']
+    features = info['particle_features']
 
-        base_name = os.path.splitext(os.path.basename(path))[0]
-        cols_ind = ['perimeter','area','aspect_ratio','solidity','circularity'] + [f'hu{i+1}' for i in range(7)]
-        if features:
-            df_ind = pd.DataFrame(features, columns=cols_ind)
+    base_name = os.path.splitext(os.path.basename(path))[0]
+    cols_ind = ['perimeter','area','aspect_ratio','solidity','circularity'] + [f'hu{i+1}' for i in range(7)]
+    if features:
+        df_ind = pd.DataFrame(features, columns=cols_ind)
+    else:
+        df_ind = pd.DataFrame(columns=cols_ind)
+    csv_path = os.path.join(self.output_individual_csv_folder, base_name + '.csv')
+    try:
+        df_ind.to_csv(csv_path, index=False)
+    except Exception as e:
+        QMessageBox.warning(self, "Save error", f"Failed to save individual CSV for {path}:\n{e}")
+
+    overlay_path = os.path.join(self.output_overlay_folder, os.path.basename(path))
+
+    # ★ インデックス番号を画像に書き込む処理を追加
+    index_text = f"#{self.current_index + 1}"
+    cv2.putText(
+        overlay,                # 描画対象画像
+        index_text,             # 表示するテキスト
+        (30, 50),               # 表示位置 (x, y)
+        cv2.FONT_HERSHEY_SIMPLEX,  # フォント
+        2,                      # フォントスケール
+        (0, 0, 255),            # 赤色 (BGR)
+        4,                      # 太さ
+        cv2.LINE_AA             # アンチエイリアス
+    )
+
+    try:
+        cv2.imwrite(overlay_path, overlay)
+    except Exception as e:
+        QMessageBox.warning(self, "Save error", f"Failed to save overlay image for {path}:\n{e}")
+
+    summary_cols = ['filename','perimeter','area','aspect_ratio','solidity','circularity'] + [f'hu{i+1}' for i in range(7)]
+    if features:
+        mean_features = np.mean(np.array(features), axis=0).tolist()
+    else:
+        mean_features = [np.nan]*12
+    row = [os.path.basename(path)] + mean_features
+    summary_updated = False
+    try:
+        if not os.path.exists(self.summary_csv_path):
+            df = pd.DataFrame([row], columns=summary_cols)
+            df.to_csv(self.summary_csv_path, index=False)
         else:
-            df_ind = pd.DataFrame(columns=cols_ind)
-        csv_path = os.path.join(self.output_individual_csv_folder, base_name + '.csv')
-        try:
-            df_ind.to_csv(csv_path, index=False)
-        except Exception as e:
-            QMessageBox.warning(self, "Save error", f"Failed to save individual CSV for {path}:\n{e}")
+            df = pd.DataFrame([row], columns=summary_cols)
+            df.to_csv(self.summary_csv_path, mode='a', header=False, index=False)
+        summary_updated = True
+    except Exception as e:
+        QMessageBox.warning(self, "Summary save error", f"Failed to update summary CSV:\n{e}")
 
-        overlay_path = os.path.join(self.output_overlay_folder, os.path.basename(path))
-        try:
-            cv2.imwrite(overlay_path, overlay)
-        except Exception as e:
-            QMessageBox.warning(self, "Save error", f"Failed to save overlay image for {path}:\n{e}")
+    method = self.cmb_method.currentText()
+    entry = {
+        'timestamp': datetime.now().isoformat(),
+        'filename': os.path.basename(path),
+        'mode': self.current_mode,
+        'result': 'OK',
+        'num_contours': len(features) if features is not None else 0,
+        'threshold_method': method,
+        'manual_threshold': (self.slider_manual.value() if method == 'manual' else 'N/A'),
+        'adaptive_blocksize': (self.spin_adapt_bs.value() if method == 'adaptive' else 'N/A'),
+        'adaptive_C': (self.spin_adapt_C.value() if method == 'adaptive' else 'N/A'),
+        'overlay_path': overlay_path if os.path.exists(overlay_path) else '',
+        'individual_csv_path': csv_path if os.path.exists(csv_path) else '',
+        'summary_updated': str(summary_updated),
+        'error_message': ''
+    }
+    self.append_processing_log(entry)
 
-        summary_cols = ['filename','perimeter','area','aspect_ratio','solidity','circularity'] + [f'hu{i+1}' for i in range(7)]
-        if features:
-            mean_features = np.mean(np.array(features), axis=0).tolist()
-        else:
-            mean_features = [np.nan]*12
-        row = [os.path.basename(path)] + mean_features
-        summary_updated = False
-        try:
-            if not os.path.exists(self.summary_csv_path):
-                df = pd.DataFrame([row], columns=summary_cols)
-                df.to_csv(self.summary_csv_path, index=False)
-            else:
-                df = pd.DataFrame([row], columns=summary_cols)
-                df.to_csv(self.summary_csv_path, mode='a', header=False, index=False)
-            summary_updated = True
-        except Exception as e:
-            QMessageBox.warning(self, "Summary save error", f"Failed to update summary CSV:\n{e}")
+    self.lbl_status.setText(f"Saved: {base_name}")
+    self.next_index()
 
-        # ログ追記（OK）。使われないパラメータは 'N/A' とする
-        method = self.cmb_method.currentText()
-        entry = {
-            'timestamp': datetime.now().isoformat(),
-            'filename': os.path.basename(path),
-            'mode': self.current_mode,
-            'result': 'OK',
-            'num_contours': len(features) if features is not None else 0,
-            'threshold_method': method,
-            'manual_threshold': (self.slider_manual.value() if method == 'manual' else 'N/A'),
-            'adaptive_blocksize': (self.spin_adapt_bs.value() if method == 'adaptive' else 'N/A'),
-            'adaptive_C': (self.spin_adapt_C.value() if method == 'adaptive' else 'N/A'),
-            'overlay_path': overlay_path if os.path.exists(overlay_path) else '',
-            'individual_csv_path': csv_path if os.path.exists(csv_path) else '',
-            'summary_updated': str(summary_updated),
-            'error_message': ''
-        }
-        self.append_processing_log(entry)
-
-        self.lbl_status.setText(f"Saved: {base_name}")
-        self.next_index()
-
+    
     # NG 取扱い
     def mark_ng_and_next(self):
         if not self.btn_ng.isEnabled():
