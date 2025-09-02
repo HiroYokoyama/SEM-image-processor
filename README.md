@@ -7,3 +7,5 @@ Created with ChatGPT
 `pip install pyqt5 opencv-python-headless numpy pandas scikit-image`
 
 # Run
+`particle-ip.py`
+
