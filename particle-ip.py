@@ -31,14 +31,8 @@ from PyQt5.QtGui import QPixmap, QImage, QKeySequence
 from PyQt5.QtCore import Qt
 
 # ------------------ 画像処理関数 ------------------
-
 def process_image_get_features(img_path, threshold_method='otsu', manual_threshold=128,
                                adaptive_blocksize=11, adaptive_C=2):
-    """
-    戻り値:
-      overlay_img (BGR numpy), particle_features (list)
-    features = [perimeter, area, aspect_ratio, solidity, circularity, hu1..hu7]
-    """
     img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
     if img is None:
         raise ValueError(f"Cannot read image: {img_path}")
@@ -47,49 +41,22 @@ def process_image_get_features(img_path, threshold_method='otsu', manual_thresho
     img_crop = img[:int(0.9*h), :].copy()
     img_blur = cv2.GaussianBlur(img_crop, (3,3), 0)
 
-    # 二値化
+    # 二値化処理
     if threshold_method == 'otsu':
         _, thresh = cv2.threshold(img_blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     elif threshold_method == 'manual':
-        _, thresh = cv2.threshold(img_blur, int(manual_threshold), 255, cv2.THRESH_BINARY)
-    elif threshold_method == 'li':
-        if not SKIMAGE_AVAILABLE:
-            raise RuntimeError("scikit-imageが必要です: pip install scikit-image")
-        li_thresh = threshold_li(img_blur)
-        _, thresh = cv2.threshold(img_blur, li_thresh, 255, cv2.THRESH_BINARY)
-    elif threshold_method == 'triangle':
-        if not SKIMAGE_AVAILABLE:
-            raise RuntimeError("scikit-imageが必要です: pip install scikit-image")
-        tri_thresh = threshold_triangle(img_blur)
-        _, thresh = cv2.threshold(img_blur, tri_thresh, 255, cv2.THRESH_BINARY)
-    elif threshold_method == 'yen':
-        if not SKIMAGE_AVAILABLE:
-            raise RuntimeError("scikit-imageが必要です: pip install scikit-image")
-        yen_thresh = threshold_yen(img_blur)
-        _, thresh = cv2.threshold(img_blur, yen_thresh, 255, cv2.THRESH_BINARY)
-    elif threshold_method == 'isodata':
-        if not SKIMAGE_AVAILABLE:
-            raise RuntimeError("scikit-imageが必要です: pip install scikit-image")
-        iso_thresh = threshold_isodata(img_blur)
-        _, thresh = cv2.threshold(img_blur, iso_thresh, 255, cv2.THRESH_BINARY)
+        _, thresh = cv2.threshold(img_blur, manual_threshold, 255, cv2.THRESH_BINARY)
     elif threshold_method == 'adaptive':
-        bs = int(adaptive_blocksize)
-        if bs % 2 == 0:
-            bs = bs + 1
-        if bs < 3:
-            bs = 3
-        thresh = cv2.adaptiveThreshold(img_blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                       cv2.THRESH_BINARY, bs, int(adaptive_C))
+        thresh = cv2.adaptiveThreshold(img_blur, 255, cv2.ADAPTIVE_THRESH_MEAN_C,
+                                       cv2.THRESH_BINARY, adaptive_blocksize, adaptive_C)
     else:
-        raise ValueError(f"Unknown threshold method: {threshold_method}")
+        # デフォルトはOTSU
+        _, thresh = cv2.threshold(img_blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
+    # 輪郭検出
     contours_info = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if len(contours_info) == 3:
-        _, contours, _ = contours_info
-    else:
-        contours, _ = contours_info
+    contours = contours_info[1] if len(contours_info) == 3 else contours_info[0]
 
-   
     particle_features = []
     overlay_img = cv2.cvtColor(img_crop, cv2.COLOR_GRAY2BGR)
     mask = np.zeros_like(overlay_img)
@@ -131,6 +98,7 @@ def process_image_get_features(img_path, threshold_method='otsu', manual_thresho
 
     overlay_img = cv2.addWeighted(overlay_img, 1.0, mask, 0.5, 0)
     return overlay_img, particle_features
+
 
 
 # ------------------ OpenCV->QPixmap ------------------
