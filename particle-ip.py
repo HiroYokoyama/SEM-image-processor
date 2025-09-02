@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Particle Image Processor (with progress save/resume)
+Particle Image Processor
 github.com/HiroYokoyama/particle-image-processor
-保存: particle-ip.py
-依存: PyQt5, opencv-python (or opencv-python-headless), numpy, pandas, scikit-image (一部method)
+Dependencies: PyQt5, opencv-python (or opencv-python-headless), numpy, pandas, scikit-image (for some methods)
 """
 
 import sys
@@ -20,7 +19,7 @@ from datetime import datetime
 try:
     from skimage.filters import threshold_li, threshold_triangle, threshold_yen, threshold_isodata
     SKIMAGE_AVAILABLE = True
-except Exception:
+except ImportError:
     SKIMAGE_AVAILABLE = False
 
 from PyQt5.QtWidgets import (
@@ -31,97 +30,78 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtGui import QPixmap, QImage, QKeySequence
 from PyQt5.QtCore import Qt
 
-# ------------------ 画像処理関数 ------------------
+# ------------------ Image Processing Functions ------------------
 
 def process_image_get_features(img_path, threshold_method='otsu', manual_threshold=128,
                                adaptive_blocksize=11, adaptive_C=2):
     """
-    戻り値:
-      overlay_img (BGR numpy), particle_features (list)
-    features = [perimeter, area, aspect_ratio, solidity, circularity, hu1..hu7]
-    粒子ごとに赤い小さめの番号を表示する（重心に描画）。
+    Returns:
+      overlay_img (numpy array in BGR format), particle_features (list of features)
+    Features = [Perimeter, Area, Aspect Ratio, Solidity, Circularity, Hu Moments 1..7]
+    Draws a small red number at the centroid of each particle (contour).
     """
     img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
     if img is None:
-        raise ValueError(f"Cannot read image: {img_path}")
+        raise ValueError(f"Cannot load image: {img_path}")
 
     h, w = img.shape
     img_crop = img[:int(0.9*h), :].copy()
     img_blur = cv2.GaussianBlur(img_crop, (3,3), 0)
 
-    # 二値化
+    # Binarization Process
     if threshold_method == 'otsu':
         _, thresh = cv2.threshold(img_blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     elif threshold_method == 'manual':
         _, thresh = cv2.threshold(img_blur, int(manual_threshold), 255, cv2.THRESH_BINARY)
-    elif threshold_method == 'li':
-        if not SKIMAGE_AVAILABLE:
-            raise RuntimeError("scikit-imageが必要です: pip install scikit-image")
-        li_thresh = threshold_li(img_blur)
-        _, thresh = cv2.threshold(img_blur, li_thresh, 255, cv2.THRESH_BINARY)
-    elif threshold_method == 'triangle':
-        if not SKIMAGE_AVAILABLE:
-            raise RuntimeError("scikit-imageが必要です: pip install scikit-image")
-        tri_thresh = threshold_triangle(img_blur)
-        _, thresh = cv2.threshold(img_blur, tri_thresh, 255, cv2.THRESH_BINARY)
-    elif threshold_method == 'yen':
-        if not SKIMAGE_AVAILABLE:
-            raise RuntimeError("scikit-imageが必要です: pip install scikit-image")
-        yen_thresh = threshold_yen(img_blur)
-        _, thresh = cv2.threshold(img_blur, yen_thresh, 255, cv2.THRESH_BINARY)
-    elif threshold_method == 'isodata':
-        if not SKIMAGE_AVAILABLE:
-            raise RuntimeError("scikit-imageが必要です: pip install scikit-image")
-        iso_thresh = threshold_isodata(img_blur)
-        _, thresh = cv2.threshold(img_blur, iso_thresh, 255, cv2.THRESH_BINARY)
+    elif SKIMAGE_AVAILABLE:
+        if threshold_method == 'li':
+            thresh_val = threshold_li(img_blur)
+        elif threshold_method == 'triangle':
+            thresh_val = threshold_triangle(img_blur)
+        elif threshold_method == 'yen':
+            thresh_val = threshold_yen(img_blur)
+        elif threshold_method == 'isodata':
+            thresh_val = threshold_isodata(img_blur)
+        else:
+            raise ValueError(f"Unknown binarization method: {threshold_method}")
+        _, thresh = cv2.threshold(img_blur, thresh_val, 255, cv2.THRESH_BINARY)
     elif threshold_method == 'adaptive':
         bs = int(adaptive_blocksize)
-        if bs % 2 == 0:
-            bs = bs + 1
-        if bs < 3:
-            bs = 3
+        bs = bs + 1 if bs % 2 == 0 else bs
+        bs = max(3, bs)
         thresh = cv2.adaptiveThreshold(img_blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
                                        cv2.THRESH_BINARY, bs, int(adaptive_C))
     else:
-        raise ValueError(f"Unknown threshold method: {threshold_method}")
+        if not SKIMAGE_AVAILABLE and threshold_method in ['li', 'triangle', 'yen', 'isodata']:
+             raise RuntimeError("This method requires scikit-image: pip install scikit-image")
+        raise ValueError(f"Unknown binarization method: {threshold_method}")
 
     contours_info = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    # OpenCV のバージョン差に対応
-    if len(contours_info) == 3:
-        _, contours, _ = contours_info
-    else:
-        contours, _ = contours_info
+    # Handle OpenCV version differences
+    contours = contours_info[0] if len(contours_info) == 2 else contours_info[1]
 
     particle_features = []
     overlay_img = cv2.cvtColor(img_crop, cv2.COLOR_GRAY2BGR)
     mask = np.zeros_like(overlay_img)
 
     for i, cnt in enumerate(contours):
-        color = (int(np.random.randint(0, 256)),
-                 int(np.random.randint(0, 256)),
-                 int(np.random.randint(0, 256)))
-
-        # マスクに塗りつぶし
+        color = tuple(np.random.randint(0, 256, 3).tolist())
         cv2.drawContours(mask, [cnt], -1, color, thickness=-1)
 
-        # 粒子番号（重心に描画） — 赤, 小さめ
+        # Calculate the centroid of the contour
         M = cv2.moments(cnt)
         if M.get("m00", 0) != 0:
             cx = int(M["m10"] / M["m00"])
             cy = int(M["m01"] / M["m00"])
-        else:
-            # fallback: bounding rect center
+        else: # If centroid calculation fails, use the center of the bounding rectangle
             x, y, w_c, h_c = cv2.boundingRect(cnt)
-            cx = x + w_c // 2
-            cy = y + h_c // 2
+            cx, cy = x + w_c // 2, y + h_c // 2
 
-        cv2.putText(mask, str(i + 1), (cx, cy),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1, cv2.LINE_AA)
+        cv2.putText(mask, str(i + 1), (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1, cv2.LINE_AA)
 
-        # 特徴量計算
+        # Calculate features
         area = cv2.contourArea(cnt)
-        if area == 0:
-            continue
+        if area == 0: continue
         perimeter = cv2.arcLength(cnt, True)
         x, y, w_c, h_c = cv2.boundingRect(cnt)
         aspect_ratio = float(w_c) / h_c if h_c != 0 else 0
@@ -129,36 +109,29 @@ def process_image_get_features(img_path, threshold_method='otsu', manual_thresho
         hull_area = cv2.contourArea(hull)
         solidity = float(area) / hull_area if hull_area != 0 else 0
         circularity = 4 * np.pi * area / (perimeter ** 2) if perimeter != 0 else 0
-
-        moments = cv2.moments(cnt)
-        hu_moments = cv2.HuMoments(moments).flatten()
+        hu_moments = cv2.HuMoments(cv2.moments(cnt)).flatten()
         features = [perimeter, area, aspect_ratio, solidity, circularity] + hu_moments.tolist()
         particle_features.append(features)
 
-    # 半透明合成（alpha=0.5）
+    # Blend the original image and the mask with transparency
     overlay_img = cv2.addWeighted(overlay_img, 1.0, mask, 0.5, 0)
-
     return overlay_img, particle_features
 
+# ------------------ Convert OpenCV to QPixmap ------------------
 
-# ------------------ OpenCV->QPixmap ------------------
-
-def cv2_to_qpixmap(cv_bgr):
-    if cv_bgr is None:
-        return QPixmap()
-    if len(cv_bgr.shape) == 2:
-        height, width = cv_bgr.shape
-        bytes_per_line = width
-        qimg = QImage(cv_bgr.data, width, height, bytes_per_line, QImage.Format_Indexed8)
-        return QPixmap.fromImage(qimg)
-    rgb = cv2.cvtColor(cv_bgr, cv2.COLOR_BGR2RGB)
-    h, w, ch = rgb.shape
-    bytes_per_line = ch * w
-    qimg = QImage(rgb.data, w, h, bytes_per_line, QImage.Format_RGB888)
+def cv2_to_qpixmap(cv_img):
+    """Converts an OpenCV image (numpy array) to a PyQt QPixmap."""
+    if cv_img is None: return QPixmap()
+    if len(cv_img.shape) == 2: # Grayscale image
+        h, w = cv_img.shape
+        qimg = QImage(cv_img.data, w, h, w, QImage.Format_Grayscale8)
+    else: # Color image
+        h, w, ch = cv_img.shape
+        bytes_per_line = ch * w
+        qimg = QImage(cv_img.data, w, h, bytes_per_line, QImage.Format_RGB888).rgbSwapped()
     return QPixmap.fromImage(qimg)
 
-
-# ------------------ GUI ------------------
+# ------------------ GUI Class ------------------
 
 class PIPGui(QWidget):
     def __init__(self):
@@ -166,7 +139,7 @@ class PIPGui(QWidget):
         self.setWindowTitle("Particle Image Processor")
         self.resize(1100, 700)
 
-        # 状態
+        # State variables
         self.image_list = []
         self.current_index = -1
         self.ng_list = []
@@ -176,710 +149,455 @@ class PIPGui(QWidget):
         self.output_individual_csv_folder = ''
         self.summary_csv_path = ''
         self.processing_log_path = ''
-        self.processed_files = []   # [{'filename': '...', 'result': 'OK'/'NG'}, ...]
+        self.processed_files = []
 
-        # ログヘッダ (面積はログに含めない)
+        # Log file headers
         self.log_headers = [
-            'timestamp','filename','mode','result','num_contours',
-            'threshold_method','manual_threshold','adaptive_blocksize','adaptive_C',
-            'overlay_path','individual_csv_path','summary_updated','error_message'
+            'timestamp', 'filename', 'mode', 'result', 'num_contours',
+            'threshold_method', 'manual_threshold', 'adaptive_blocksize', 'adaptive_C',
+            'overlay_path', 'individual_csv_path', 'summary_updated', 'error_message'
         ]
 
         self._build_ui()
-        # 初回でパラメータ有効/無効の状態を更新
         self.update_param_fields()
 
     def _build_ui(self):
         main_layout = QHBoxLayout(self)
 
-        # 左: 画像表示 + 大きめOK/NGボタン下部に配置
+        # Left Panel: Image Display
         left_v = QVBoxLayout()
         imgs_h = QHBoxLayout()
-
-        self.label_original = QLabel("Original")
+        self.label_original = QLabel("Original Image")
         self.label_original.setFixedSize(500, 500)
-        self.label_original.setStyleSheet("background-color: #222; border: 1px solid #444;")
-        self.label_overlay = QLabel("Overlay")
+        self.label_original.setStyleSheet("background-color: #222; border: 1px solid #444; color: #fff; qproperty-alignment: 'AlignCenter';")
+        self.label_overlay = QLabel("Processed Image")
         self.label_overlay.setFixedSize(500, 500)
-        self.label_overlay.setStyleSheet("background-color: #222; border: 1px solid #444;")
-
+        self.label_overlay.setStyleSheet("background-color: #222; border: 1px solid #444; color: #fff; qproperty-alignment: 'AlignCenter';")
         imgs_h.addWidget(self.label_original)
         imgs_h.addWidget(self.label_overlay)
         left_v.addLayout(imgs_h)
 
-        # OK / NG 大きめボタン（画像下）
+        # OK / NG Buttons
         buttons_under = QHBoxLayout()
-        buttons_under.setSpacing(40)
-        buttons_under.setContentsMargins(10,10,10,10)
-
-        self.btn_ok = QPushButton("OK")
+        self.btn_ok = QPushButton("OK (O)")
         self.btn_ok.setFixedHeight(68)
         self.btn_ok.setStyleSheet("font-size:20px; padding:10px; background-color: #4CAF50; color: white;")
         self.btn_ok.clicked.connect(self.mark_ok_and_next)
         self.btn_ok.setEnabled(False)
-
-        self.btn_ng = QPushButton("NG")
+        self.btn_ng = QPushButton("NG (N)")
         self.btn_ng.setFixedHeight(68)
         self.btn_ng.setStyleSheet("font-size:20px; padding:10px; background-color: #F44336; color: white;")
         self.btn_ng.clicked.connect(self.mark_ng_and_next)
         self.btn_ng.setEnabled(False)
-
         buttons_under.addStretch()
         buttons_under.addWidget(self.btn_ok)
         buttons_under.addWidget(self.btn_ng)
         buttons_under.addStretch()
         left_v.addLayout(buttons_under)
 
-        # 進捗
+        # Progress Bar
         self.progress_label = QLabel("Progress: 0/0")
         self.progress_bar = QProgressBar()
         left_v.addWidget(self.progress_label)
         left_v.addWidget(self.progress_bar)
-
         main_layout.addLayout(left_v, stretch=3)
 
-        # 右: 設定 / 操作
+        # Right Panel: Controls
         right_v = QVBoxLayout()
-
-        folder_box = QGroupBox("Folders / Output")
+        folder_box = QGroupBox("Folder Settings")
         folder_layout = QFormLayout()
         self.le_image_folder = QLineEdit()
-        btn_img_folder = QPushButton("Choose Image Folder")
-        btn_img_folder.clicked.connect(self.choose_image_folder)
-        folder_layout.addRow(btn_img_folder, self.le_image_folder)
-
+        self.le_image_folder.textChanged.connect(self.update_start_button_state)
+        self.btn_img_folder = QPushButton("Select Image Folder")
+        self.btn_img_folder.clicked.connect(self.choose_image_folder)
+        folder_layout.addRow(self.btn_img_folder, self.le_image_folder)
         self.le_output_folder = QLineEdit()
-        btn_output_folder = QPushButton("Choose Output Folder")
-        btn_output_folder.clicked.connect(self.choose_output_folder)
-        folder_layout.addRow(btn_output_folder, self.le_output_folder)
-
+        self.le_output_folder.textChanged.connect(self.update_start_button_state)
+        self.btn_output_folder = QPushButton("Select Output Folder")
+        self.btn_output_folder.clicked.connect(self.choose_output_folder)
+        folder_layout.addRow(self.btn_output_folder, self.le_output_folder)
         folder_box.setLayout(folder_layout)
         right_v.addWidget(folder_box)
 
-        thresh_box = QGroupBox("Threshold Settings")
+        # Binarization Settings
+        thresh_box = QGroupBox("Binarization Settings")
         thresh_layout = QFormLayout()
         self.cmb_method = QComboBox()
-        self.cmb_method.addItems(['otsu','manual','li','triangle','yen','isodata','adaptive'])
-        # method変更でパラメータUIを更新
+        items = ['otsu', 'manual', 'adaptive']
+        if SKIMAGE_AVAILABLE: items.extend(['li', 'triangle', 'yen', 'isodata'])
+        self.cmb_method.addItems(items)
         self.cmb_method.currentIndexChanged.connect(self.update_param_fields)
         thresh_layout.addRow("Method:", self.cmb_method)
 
-        # manual slider
         self.slider_manual = QSlider(Qt.Horizontal)
-        self.slider_manual.setRange(0,255)
-        self.slider_manual.setValue(128)
-        self.lbl_manual = QLabel("Manual: 128")
-        self.slider_manual.valueChanged.connect(lambda v: self.lbl_manual.setText(f"Manual: {v}"))
+        self.slider_manual.setRange(0, 255); self.slider_manual.setValue(128)
+        self.lbl_manual = QLabel("Manual Threshold: 128")
+        self.slider_manual.valueChanged.connect(lambda v: self.lbl_manual.setText(f"Manual Threshold: {v}"))
         thresh_layout.addRow(self.lbl_manual, self.slider_manual)
 
-        # adaptive controls
-        self.spin_adapt_bs = QSpinBox()
-        self.spin_adapt_bs.setRange(3,99)
-        self.spin_adapt_bs.setValue(11)
-        self.spin_adapt_bs.setSingleStep(2)
-        self.spin_adapt_C = QSpinBox()
-        self.spin_adapt_C.setRange(-50,50)
-        self.spin_adapt_C.setValue(2)
-        adapt_h = QHBoxLayout()
-        adapt_h.addWidget(QLabel("BlockSize:"))
-        adapt_h.addWidget(self.spin_adapt_bs)
-        adapt_h.addWidget(QLabel("C:"))
-        adapt_h.addWidget(self.spin_adapt_C)
+        self.spin_adapt_bs = QSpinBox(); self.spin_adapt_bs.setRange(3, 99); self.spin_adapt_bs.setValue(11); self.spin_adapt_bs.setSingleStep(2)
+        self.spin_adapt_C = QSpinBox(); self.spin_adapt_C.setRange(-50, 50); self.spin_adapt_C.setValue(2)
+        adapt_h = QHBoxLayout(); adapt_h.addWidget(QLabel("Block Size:")); adapt_h.addWidget(self.spin_adapt_bs); adapt_h.addWidget(QLabel("C:")); adapt_h.addWidget(self.spin_adapt_C)
         thresh_layout.addRow(adapt_h)
-
         thresh_box.setLayout(thresh_layout)
         right_v.addWidget(thresh_box)
 
-        # 実行ボタン
-        btns_v = QHBoxLayout()
-        self.btn_start_initial = QPushButton("Start Initial Pass")
-        self.btn_start_initial.clicked.connect(self.start_initial_pass)
-        btns_v.addWidget(self.btn_start_initial)
+        # Start Button
+        self.btn_start = QPushButton("Start / Resume")
+        self.btn_start.setFixedHeight(40)
+        self.btn_start.setStyleSheet("font-size: 16px; background-color: #2196F3; color: white;")
+        self.btn_start.clicked.connect(self.start_or_resume_processing)
+        right_v.addWidget(self.btn_start)
 
-        self.btn_start_reprocess_ng = QPushButton("Start Reprocess NG (batch)")
-        self.btn_start_reprocess_ng.clicked.connect(self.start_reprocess_ng)
-        self.btn_start_reprocess_ng.setEnabled(False)
-        btns_v.addWidget(self.btn_start_reprocess_ng)
-
-        right_v.addLayout(btns_v)
-
-        # navigation
-        self.btn_prev = QPushButton("Prev")
+        # Navigation Buttons
+        nav_h = QHBoxLayout()
+        self.btn_prev = QPushButton("Previous")
         self.btn_prev.clicked.connect(self.prev_image)
         self.btn_prev.setEnabled(False)
-        self.btn_next = QPushButton("Next (treat as NG)")
+        self.btn_next = QPushButton("Next (as NG)")
         self.btn_next.clicked.connect(self.next_image)
         self.btn_next.setEnabled(False)
-        step_h = QHBoxLayout()
-        step_h.addWidget(self.btn_prev)
-        step_h.addWidget(self.btn_next)
-        right_v.addLayout(step_h)
+        nav_h.addWidget(self.btn_prev)
+        nav_h.addWidget(self.btn_next)
+        right_v.addLayout(nav_h)
 
-        self.lbl_status = QLabel("")
+        # Status Label
+        self.lbl_status = QLabel("Select folders and press 'Start'.")
         right_v.addWidget(self.lbl_status)
-
         right_v.addStretch()
         main_layout.addLayout(right_v, stretch=1)
 
-        # ショートカット
-        sc_ok = QShortcut(QKeySequence('O'), self)
-        sc_ok.setContext(Qt.ApplicationShortcut)
-        sc_ok.activated.connect(lambda: self._shortcut_trigger('ok'))
-        sc_ng = QShortcut(QKeySequence('N'), self)
-        sc_ng.setContext(Qt.ApplicationShortcut)
-        sc_ng.activated.connect(lambda: self._shortcut_trigger('ng'))
+        # Shortcut Keys
+        QShortcut(QKeySequence('O'), self, lambda: self.btn_ok.click() if self.btn_ok.isEnabled() else None)
+        QShortcut(QKeySequence('N'), self, lambda: self.btn_ng.click() if self.btn_ng.isEnabled() else None)
+        
+        # Update initial button state
+        self.update_start_button_state()
 
-    # ---------------- progress JSON helpers ----------------
+    # ---------------- Progress Saving (JSON) Helper Functions ----------------
     def get_progress_path(self):
-        """出力フォルダに保存する progress.json のパスを返す。出力フォルダ未指定なら None を返す。"""
+        """Returns the path to the progress file (progress.json)."""
         base = self.le_output_folder.text().strip()
-        if not base:
-            return None
-        return os.path.join(base, "progress.json")
+        return os.path.join(base, "progress.json") if base else None
 
-    def save_progress(self):
-        """現在の進捗を progress.json に保存する。OK/NG 毎に呼ぶ。"""
+    def save_progress(self, completed=False):
+        """Saves the current session state to a JSON file."""
         ppath = self.get_progress_path()
-        if not ppath:
-            return
-        data = {
-            "mode": self.current_mode,
-            "current_index": self.current_index,
-            "processed_files": list(self.processed_files),
-            "input_folder": self.le_image_folder.text().strip(),
-            "output_folder": self.le_output_folder.text().strip(),
-            "timestamp": datetime.now().isoformat()
-        }
+        if not ppath: return
+
+        if completed:
+            data = {
+                "status": "Completed",
+                "input_folder": self.le_image_folder.text().strip(),
+                "output_folder": self.le_output_folder.text().strip(),
+                "timestamp": datetime.now().isoformat()
+            }
+        else:
+            data = {
+                "status": "In Progress",
+                "mode": self.current_mode, "image_list": self.image_list,
+                "ng_list": self.ng_list, "processed_files": list(self.processed_files),
+                "input_folder": self.le_image_folder.text().strip(),
+                "output_folder": self.le_output_folder.text().strip(),
+                "timestamp": datetime.now().isoformat()
+            }
         try:
             with open(ppath, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
         except Exception as e:
-            QMessageBox.warning(self, "Save Progress error", f"Failed to save progress:\n{e}")
+            QMessageBox.warning(self, "Progress Save Error", f"Failed to save progress:\n{e}")
 
     def load_progress(self):
-        """progress.json を読み込んで dict を返す。無ければ None を返す。"""
+        """Loads the session state from a JSON file."""
         ppath = self.get_progress_path()
-        if not ppath or not os.path.exists(ppath):
-            return None
+        if not ppath or not os.path.exists(ppath): return None
         try:
             with open(ppath, 'r', encoding='utf-8') as f:
                 data = json.load(f)
+            # Basic validation
+            if "status" not in data:
+                 QMessageBox.warning(self, "Invalid Progress File", "The progress file is old or corrupted. Starting a new session if possible.")
+                 return None
             return data
         except Exception as e:
-            QMessageBox.warning(self, "Load Progress error", f"Failed to load progress:\n{e}")
+            QMessageBox.warning(self, "Progress Load Error", f"Failed to load progress:\n{e}")
             return None
 
-    def clear_progress(self):
-        """progress.json を削除し、内部の processed_files をクリア（主に新規開始時に使用）。"""
-        ppath = self.get_progress_path()
-        if ppath and os.path.exists(ppath):
-            try:
-                os.remove(ppath)
-            except Exception as e:
-                QMessageBox.warning(self, "Clear Progress error", f"Failed to remove progress file:\n{e}")
-        self.processed_files = []
-
-    # ショートカット処理
-    def _shortcut_trigger(self, kind):
-        if kind == 'ok' and self.btn_ok.isEnabled():
-            self.mark_ok_and_next()
-        elif kind == 'ng' and self.btn_ng.isEnabled():
-            self.mark_ng_and_next()
-
-    # フォルダ選択
+    # ---------------- UI and Control Logic ----------------
     def choose_image_folder(self):
-        d = QFileDialog.getExistingDirectory(self, "Choose image folder", os.getcwd())
-        if d:
-            self.le_image_folder.setText(d)
+        """Opens a dialog to select the image folder."""
+        d = QFileDialog.getExistingDirectory(self, "Select Image Folder", os.getcwd())
+        if d: self.le_image_folder.setText(d)
 
     def choose_output_folder(self):
-        d = QFileDialog.getExistingDirectory(self, "Choose output folder", os.getcwd())
-        if d:
-            self.le_output_folder.setText(d)
+        """Opens a dialog to select the output folder."""
+        d = QFileDialog.getExistingDirectory(self, "Select Output Folder", os.getcwd())
+        if d: self.le_output_folder.setText(d)
+        
+    def update_start_button_state(self):
+        """Enables/disables the start button based on folder selection and image file presence."""
+        image_folder = self.le_image_folder.text().strip()
+        output_folder = self.le_output_folder.text().strip()
 
-    # ---------------- パラメータUI更新 ----------------
-    def update_param_fields(self):
-        """Method に応じて manual slider / adaptive controls を有効化 or グレーアウト"""
-        method = self.cmb_method.currentText()
-        if method == 'manual':
-            # manual 有効、adaptive 無効
-            self.slider_manual.setEnabled(True)
-            self.lbl_manual.setEnabled(True)
-            self.spin_adapt_bs.setEnabled(False)
-            self.spin_adapt_C.setEnabled(False)
-        elif method == 'adaptive':
-            # adaptive 有効、manual 無効
-            self.slider_manual.setEnabled(False)
-            self.lbl_manual.setEnabled(False)
-            self.spin_adapt_bs.setEnabled(True)
-            self.spin_adapt_C.setEnabled(True)
-        else:
-            # その他は両方無効
-            self.slider_manual.setEnabled(False)
-            self.lbl_manual.setEnabled(False)
-            self.spin_adapt_bs.setEnabled(False)
-            self.spin_adapt_C.setEnabled(False)
-
-    # ---------------- ログヘルパー ----------------
-    def _ensure_log_initialized(self):
-        if not self.processing_log_path:
+        if not image_folder or not output_folder or not os.path.isdir(image_folder):
+            self.btn_start.setEnabled(False)
             return
-        if not os.path.exists(self.processing_log_path):
-            try:
-                with open(self.processing_log_path, 'w', newline='', encoding='utf-8') as f:
-                    writer = csv.writer(f)
-                    writer.writerow(self.log_headers)
-            except Exception as e:
-                QMessageBox.warning(self, "Log init error", f"Cannot initialize log file:\n{e}")
+        
+        # Check if at least one image file exists
+        exts = ('*.png', '*.jpg', '*.jpeg', '*.tif', '*.tiff', '*.bmp')
+        has_images = any(glob.glob(os.path.join(image_folder, e)) for e in exts)
+        
+        self.btn_start.setEnabled(has_images)
+        
+        # Check for completed status
+        progress_data = self.load_progress()
+        if progress_data and progress_data.get("status") == "Completed":
+            self.lbl_status.setText("Processing for this folder is complete.")
+            self.btn_start.setEnabled(False)
+            self.btn_img_folder.setEnabled(False)
+            self.btn_output_folder.setEnabled(False)
+
+
+    def update_param_fields(self):
+        """Enables/disables related UI elements based on the selected binarization method."""
+        method = self.cmb_method.currentText()
+        is_manual = method == 'manual'
+        is_adaptive = method == 'adaptive'
+        self.slider_manual.setEnabled(is_manual)
+        self.lbl_manual.setEnabled(is_manual)
+        self.spin_adapt_bs.setEnabled(is_adaptive)
+        self.spin_adapt_C.setEnabled(is_adaptive)
+
+    # ---------------- Log-related Helper Functions ----------------
+    def _ensure_log_initialized(self):
+        """If the log file does not exist, initialize it by writing the header."""
+        if not self.processing_log_path or os.path.exists(self.processing_log_path): return
+        try:
+            with open(self.processing_log_path, 'w', newline='', encoding='utf-8') as f:
+                csv.writer(f).writerow(self.log_headers)
+        except Exception as e:
+            QMessageBox.warning(self, "Log Initialization Error", f"Failed to initialize the log file:\n{e}")
 
     def append_processing_log(self, entry_dict):
-        if not self.processing_log_path:
-            return
+        """Appends a row to the log file."""
+        if not self.processing_log_path: return
         self._ensure_log_initialized()
         row = [entry_dict.get(h, '') for h in self.log_headers]
         try:
             with open(self.processing_log_path, 'a', newline='', encoding='utf-8') as f:
-                writer = csv.writer(f)
-                writer.writerow(row)
+                csv.writer(f).writerow(row)
         except Exception as e:
-            QMessageBox.warning(self, "Log write error", f"Cannot write to log file:\n{e}")
+            QMessageBox.warning(self, "Log Write Error", f"Failed to write to the log file:\n{e}")
 
-    # ---------------- 画像一覧取得 / 出力準備 ----------------
-    def _gather_image_list(self):
-        folder = self.le_image_folder.text().strip()
-        if not folder or not os.path.isdir(folder):
-            return []
-        exts = ('*.png','*.jpg','*.jpeg','*.tif','*.tiff','*.bmp')
-        imgs = []
-        for e in exts:
-            imgs.extend(glob.glob(os.path.join(folder, e)))
-        imgs.sort()
-        return imgs
-
-    def _prepare_output_folders(self):
-        base = self.le_output_folder.text().strip()
-        if not base:
-            raise ValueError("Please set output folder")
-        overlay = os.path.join(base, "overlay_images")
-        individual = os.path.join(base, "individual_csv")
-        os.makedirs(overlay, exist_ok=True)
-        os.makedirs(individual, exist_ok=True)
-        self.output_overlay_folder = overlay
-        self.output_individual_csv_folder = individual
-        self.summary_csv_path = os.path.join(base, "summary_features.csv")
-        self.processing_log_path = os.path.join(base, "processing_log.csv")
-        self._ensure_log_initialized()
-
-    # ---------------- メイン処理フロー ----------------
-    def start_initial_pass(self):
-        imgs = self._gather_image_list()
-        if not imgs:
-            QMessageBox.warning(self, "No images", "No images found in the selected folder.")
-            return
-
-        base_out = self.le_output_folder.text().strip()
-        if not base_out:
-            QMessageBox.warning(self, "No output folder", "Please set output folder before starting.")
-            return
-
-        # progress.json の存在チェックと再開/新規/キャンセルのダイアログ
-        ppath = os.path.join(base_out, "progress.json")
-        if os.path.exists(ppath):
-            ret = QMessageBox.question(
-                self,
-                "Resume or Start New?",
-                "A previous progress file was found. Do you want to resume the previous run?\n\n"
-                "Yes: Resume previous progress\nNo: Start a new run (this will discard the saved progress)\nCancel: Abort",
-                QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel
-            )
-            if ret == QMessageBox.Cancel:
-                return
-            elif ret == QMessageBox.No:
-                # 新規開始：保存を削除して続行
-                try:
-                    os.remove(ppath)
-                except Exception:
-                    pass
-                self.processed_files = []
-            else:
-                # Resume: 読み込んで現在状態に反映
-                try:
-                    with open(ppath, 'r', encoding='utf-8') as f:
-                        data = json.load(f)
-                    saved_mode = data.get("mode", "initial")
-                    saved_processed = data.get("processed_files", [])
-                    saved_input = data.get("input_folder", "")
-                    # 警告: 入力フォルダが異なる場合は通知する（ファイル名でマッチする）
-                    if saved_input and saved_input != self.le_image_folder.text().strip():
-                        QMessageBox.information(self, "Warning", "Saved progress input folder differs from current selection. We'll try to match files by filename.")
-                    self.current_mode = saved_mode
-                    self.processed_files = saved_processed
-                    # 最新の画像リストで再構築
-                    imgs = self._gather_image_list()
-                    self.image_list = imgs
-                    # processed_files の最後のファイル名を探して次の index から再開
-                    last_done_idx = -1
-                    if self.processed_files:
-                        last_filename = self.processed_files[-1].get("filename")
-                        for idx, p in enumerate(self.image_list):
-                            if os.path.basename(p) == last_filename:
-                                last_done_idx = idx
-                                break
-                    self.current_index = last_done_idx + 1
-                except Exception as e:
-                    QMessageBox.warning(self, "Resume error", f"Failed to resume progress file, starting fresh.\n{e}")
-                    self.processed_files = []
-
-        # 出力フォルダ準備
+    # ---------------- Core Processing Flow ----------------
+    def start_or_resume_processing(self):
+        """Main process when the 'Start/Resume' button is pressed."""
         try:
-            self._prepare_output_folders()
+            base = self.le_output_folder.text().strip()
+            self.output_overlay_folder = os.path.join(base, "overlay_images")
+            self.output_individual_csv_folder = os.path.join(base, "individual_csv")
+            os.makedirs(self.output_overlay_folder, exist_ok=True)
+            os.makedirs(self.output_individual_csv_folder, exist_ok=True)
+            self.summary_csv_path = os.path.join(base, "summary_features.csv")
+            self.processing_log_path = os.path.join(base, "processing_log.csv")
         except Exception as e:
-            QMessageBox.critical(self, "Output folder error", str(e))
+            QMessageBox.critical(self, "Output Folder Error", str(e))
             return
 
-        # 初期化（resumeがセットしていなければ）
-        if not getattr(self, "image_list", None):
-            self.image_list = imgs
-            self.current_index = 0
-            self.ng_list = []
-            self.current_mode = 'initial'
-        else:
-            # image_list は resume により既にセットされている可能性あり
-            if not self.image_list:
-                self.image_list = imgs
-                self.current_index = 0
+        progress_data = self.load_progress()
+        
+        # Check for completed state first
+        if progress_data and progress_data.get("status") == "Completed":
+            QMessageBox.information(self, "Complete", "Processing for this folder is already complete.\nTo re-run, please delete the 'progress.json' file in the output folder.")
+            self.lbl_status.setText("Processing Complete.")
+            self.btn_start.setEnabled(False)
+            return
 
+        # Resuming or moving to the next stage
+        if progress_data and progress_data.get("status") == "In Progress":
+            self.image_list = progress_data["image_list"]
+            self.processed_files = progress_data.get("processed_files", [])
+            self.current_mode = progress_data.get("mode", "initial")
+            self.ng_list = progress_data.get("ng_list", [])
+            
+            next_index = len(self.processed_files)
+
+            if next_index < len(self.image_list): # Resuming the interrupted pass
+                self.lbl_status.setText(f"Resuming '{self.current_mode}' mode...")
+                self.current_index = next_index
+            else: # If the pass is complete, check for NG images
+                if self.ng_list:
+                    self.lbl_status.setText(f"Reprocessing {len(self.ng_list)} NG images...")
+                    self.image_list = list(self.ng_list)
+                    self.current_mode = 'reprocess'
+                    self.ng_list = []
+                    self.reprocess_ng_list = []
+                    self.processed_files = []
+                    self.current_index = 0
+                    self.save_progress() # Save the state for the new reprocessing session
+                else: # Should not happen if startup check works, but as a fallback
+                    QMessageBox.information(self, "Complete", "All processing is complete. There are no remaining NG images.")
+                    self.lbl_status.setText("Processing Complete.")
+                    self.save_progress(completed=True)
+                    self.btn_start.setEnabled(False)
+                    return
+        else: # Starting a new session
+            self.lbl_status.setText("Starting a new session...")
+            exts = ('*.png', '*.jpg', '*.jpeg', '*.tif', '*.tiff', '*.bmp')
+            folder = self.le_image_folder.text().strip()
+            self.image_list = [f for e in exts for f in sorted(glob.glob(os.path.join(folder, e)))]
+            self.current_index = 0; self.ng_list = []; self.reprocess_ng_list = []; self.processed_files = []; self.current_mode = 'initial'
+            self.save_progress()
+
+        # Set the UI to the processing state
+        self.btn_start.setEnabled(False)
+        self.btn_ok.setEnabled(True); self.btn_ng.setEnabled(True); self.btn_prev.setEnabled(True); self.btn_next.setEnabled(True)
         self.progress_bar.setMaximum(len(self.image_list))
-        self.progress_bar.setValue(self.current_index)
-        self.progress_label.setText(f"Progress: {self.current_index}/{len(self.image_list)}")
-
-        self.btn_ok.setEnabled(True)
-        self.btn_ng.setEnabled(True)
-        self.btn_next.setEnabled(True)
-        self.btn_prev.setEnabled(True)
-        self.btn_start_initial.setEnabled(False)
-        self.btn_start_reprocess_ng.setEnabled(False)
-
-        # 保存しておく（再開情報）
-        self.save_progress()
-
         self.process_and_show_current()
 
     def process_and_show_current(self):
-        if self.current_mode == 'initial':
-            if not (0 <= self.current_index < len(self.image_list)):
-                self.finish_initial_pass()
-                return
-            path = self.image_list[self.current_index]
-            try:
-                overlay, particle_features = process_image_get_features(
-                    path,
-                    threshold_method=self.cmb_method.currentText(),
-                    manual_threshold=self.slider_manual.value(),
-                    adaptive_blocksize=self.spin_adapt_bs.value(),
-                    adaptive_C=self.spin_adapt_C.value()
-                )
-            except Exception as e:
-                entry = {
-                    'timestamp': datetime.now().isoformat(),
-                    'filename': os.path.basename(path),
-                    'mode': 'initial',
-                    'result': 'ERROR',
-                    'num_contours': '',
-                    'threshold_method': self.cmb_method.currentText(),
-                    'manual_threshold': (self.slider_manual.value() if self.cmb_method.currentText() == 'manual' else 'N/A'),
-                    'adaptive_blocksize': (self.spin_adapt_bs.value() if self.cmb_method.currentText() == 'adaptive' else 'N/A'),
-                    'adaptive_C': (self.spin_adapt_C.value() if self.cmb_method.currentText() == 'adaptive' else 'N/A'),
-                    'overlay_path':'',
-                    'individual_csv_path':'',
-                    'summary_updated': 'False',
-                    'error_message': str(e)
-                }
-                self.append_processing_log(entry)
-                QMessageBox.critical(self, "Processing error", f"Error processing {path}:\n{e}")
-                self.ng_list.append(path)
-                # mark as processed ERROR in processed_files and save
-                self.processed_files.append({'filename': os.path.basename(path), 'result': 'ERROR'})
-                self.save_progress()
-                self.next_index()
-                return
+        """Processes the image at the current index and displays the result."""
+        if not (0 <= self.current_index < len(self.image_list)):
+            # If all images in the current pass have been processed
+            if self.current_mode == 'initial': self.finish_initial_pass()
+            else: self.finish_reprocess_pass()
+            return
+        
+        path = self.image_list[self.current_index]
+        try:
+            overlay, features = process_image_get_features(
+                path, self.cmb_method.currentText(), self.slider_manual.value(),
+                self.spin_adapt_bs.value(), self.spin_adapt_C.value())
+        except Exception as e:
+            QMessageBox.critical(self, "Processing Error", f"An error occurred while processing the image: {path}\n\n{e}")
+            self.processed_files.append({'filename': os.path.basename(path), 'result': 'ERROR'})
+            self.save_progress()
+            self.next_index()
+            return
+        
+        # Display the image
+        original = cv2.imread(path)
+        self.label_original.setPixmap(cv2_to_qpixmap(original).scaled(self.label_original.size(), Qt.KeepAspectRatio))
+        self.label_overlay.setPixmap(cv2_to_qpixmap(overlay).scaled(self.label_overlay.size(), Qt.KeepAspectRatio))
+        self._last_processing = {'path': path, 'overlay_bgr': overlay, 'particle_features': features}
 
-            orig_pix = cv2_to_qpixmap(cv2.imread(path))
-            overlay_pix = cv2_to_qpixmap(overlay)
-            self.label_original.setPixmap(orig_pix.scaled(self.label_original.size(), Qt.KeepAspectRatio))
-            self.label_overlay.setPixmap(overlay_pix.scaled(self.label_overlay.size(), Qt.KeepAspectRatio))
-            self._last_processing = {'path': path, 'overlay_bgr': overlay, 'particle_features': particle_features}
-            self.lbl_status.setText(f"Image: {os.path.basename(path)}  Contours: {len(particle_features)}")
-            self.progress_bar.setValue(self.current_index)
-            self.progress_label.setText(f"Progress: {self.current_index}/{len(self.image_list)}")
+        # Update status
+        mode_str = "[Reprocess] " if self.current_mode == 'reprocess' else ""
+        self.lbl_status.setText(f"{mode_str}{os.path.basename(path)} | Contours: {len(features)}")
+        self.progress_label.setText(f"Progress: {self.current_index + 1}/{len(self.image_list)}")
+        self.progress_bar.setValue(self.current_index + 1)
 
-        elif self.current_mode == 'reprocess':
-            if not (0 <= self.current_index < len(self.image_list)):
-                self.finish_reprocess_pass()
-                return
-            path = self.image_list[self.current_index]
-            try:
-                overlay, particle_features = process_image_get_features(
-                    path,
-                    threshold_method=self.cmb_method.currentText(),
-                    manual_threshold=self.slider_manual.value(),
-                    adaptive_blocksize=self.spin_adapt_bs.value(),
-                    adaptive_C=self.spin_adapt_C.value()
-                )
-            except Exception as e:
-                entry = {
-                    'timestamp': datetime.now().isoformat(),
-                    'filename': os.path.basename(path),
-                    'mode': 'reprocess',
-                    'result': 'ERROR',
-                    'num_contours': '',
-                    'threshold_method': self.cmb_method.currentText(),
-                    'manual_threshold': (self.slider_manual.value() if self.cmb_method.currentText() == 'manual' else 'N/A'),
-                    'adaptive_blocksize': (self.spin_adapt_bs.value() if self.cmb_method.currentText() == 'adaptive' else 'N/A'),
-                    'adaptive_C': (self.spin_adapt_C.value() if self.cmb_method.currentText() == 'adaptive' else 'N/A'),
-                    'overlay_path':'',
-                    'individual_csv_path':'',
-                    'summary_updated': 'False',
-                    'error_message': str(e)
-                }
-                self.append_processing_log(entry)
-                QMessageBox.critical(self, "Processing error", f"Error processing {path}:\n{e}")
-                self.reprocess_ng_list.append(path)
-                # processed_files に ERROR として保存
-                self.processed_files.append({'filename': os.path.basename(path), 'result': 'ERROR'})
-                self.save_progress()
-                self.next_index()
-                return
-
-            orig_pix = cv2_to_qpixmap(cv2.imread(path))
-            overlay_pix = cv2_to_qpixmap(overlay)
-            self.label_original.setPixmap(orig_pix.scaled(self.label_original.size(), Qt.KeepAspectRatio))
-            self.label_overlay.setPixmap(overlay_pix.scaled(self.label_overlay.size(), Qt.KeepAspectRatio))
-            self._last_processing = {'path': path, 'overlay_bgr': overlay, 'particle_features': particle_features}
-            self.lbl_status.setText(f"[Reprocess] Image: {os.path.basename(path)}  Contours: {len(particle_features)}")
-            self.progress_bar.setValue(self.current_index)
-            self.progress_label.setText(f"Reprocess: {self.current_index}/{len(self.image_list)}")
-
-    # 保存（OK）処理
     def mark_ok_and_next(self):
-        if not self.btn_ok.isEnabled():
-            return
-        if not hasattr(self, '_last_processing'):
-            return
+        """Handles the 'OK' button click. Saves the results and moves to the next image."""
+        if not self.btn_ok.isEnabled() or not hasattr(self, '_last_processing'): return
         info = self._last_processing
-        path = info['path']
-        overlay = info['overlay_bgr']
-        features = info['particle_features']
-
+        path, overlay, features = info['path'], info['overlay_bgr'], info['particle_features']
+        
         base_name = os.path.splitext(os.path.basename(path))[0]
-        cols_ind = ['perimeter','area','aspect_ratio','solidity','circularity'] + [f'hu{i+1}' for i in range(7)]
-        if features:
-            df_ind = pd.DataFrame(features, columns=cols_ind)
-        else:
-            df_ind = pd.DataFrame(columns=cols_ind)
-        csv_path = os.path.join(self.output_individual_csv_folder, base_name + '.csv')
-        try:
-            df_ind.to_csv(csv_path, index=False)
-        except Exception as e:
-            QMessageBox.warning(self, "Save error", f"Failed to save individual CSV for {path}:\n{e}")
+        cols = ['perimeter', 'area', 'aspect_ratio', 'solidity', 'circularity'] + [f'hu{i+1}' for i in range(7)]
+        df = pd.DataFrame(features, columns=cols) if features else pd.DataFrame(columns=cols)
+        
+        csv_path = os.path.join(self.output_individual_csv_folder, f"{base_name}.csv")
+        df.to_csv(csv_path, index=False)
+        cv2.imwrite(os.path.join(self.output_overlay_folder, os.path.basename(path)), overlay)
 
-        overlay_path = os.path.join(self.output_overlay_folder, os.path.basename(path))
-
-        try:
-            cv2.imwrite(overlay_path, overlay)
-        except Exception as e:
-            QMessageBox.warning(self, "Save error", f"Failed to save overlay image for {path}:\n{e}")
-
-        summary_cols = ['filename','perimeter','area','aspect_ratio','solidity','circularity'] + [f'hu{i+1}' for i in range(7)]
-        if features:
-            mean_features = np.mean(np.array(features), axis=0).tolist()
-        else:
-            mean_features = [np.nan]*12
+        # Append to the summary CSV file
+        mean_features = df.mean().values.tolist() if not df.empty else [np.nan] * 12
         row = [os.path.basename(path)] + mean_features
-        summary_updated = False
-        try:
-            if not os.path.exists(self.summary_csv_path):
-                df = pd.DataFrame([row], columns=summary_cols)
-                df.to_csv(self.summary_csv_path, index=False)
-            else:
-                df = pd.DataFrame([row], columns=summary_cols)
-                df.to_csv(self.summary_csv_path, mode='a', header=False, index=False)
-            summary_updated = True
-        except Exception as e:
-            QMessageBox.warning(self, "Summary save error", f"Failed to update summary CSV:\n{e}")
-
-        method = self.cmb_method.currentText()
-        entry = {
-            'timestamp': datetime.now().isoformat(),
-            'filename': os.path.basename(path),
-            'mode': self.current_mode,
-            'result': 'OK',
-            'num_contours': len(features) if features is not None else 0,
-            'threshold_method': method,
-            'manual_threshold': (self.slider_manual.value() if method == 'manual' else 'N/A'),
-            'adaptive_blocksize': (self.spin_adapt_bs.value() if method == 'adaptive' else 'N/A'),
-            'adaptive_C': (self.spin_adapt_C.value() if method == 'adaptive' else 'N/A'),
-            'overlay_path': overlay_path if os.path.exists(overlay_path) else '',
-            'individual_csv_path': csv_path if os.path.exists(csv_path) else '',
-            'summary_updated': str(summary_updated),
-            'error_message': ''
-        }
-        self.append_processing_log(entry)
-
-        # processed_files に追記して progress.json を保存
+        pd.DataFrame([row], columns=['filename']+cols).to_csv(self.summary_csv_path, mode='a', header=not os.path.exists(self.summary_csv_path), index=False)
+        
         self.processed_files.append({'filename': os.path.basename(path), 'result': 'OK'})
         self.save_progress()
-
-        self.lbl_status.setText(f"Saved: {base_name}")
         self.next_index()
 
-    # NG 取扱い
     def mark_ng_and_next(self):
-        if not self.btn_ng.isEnabled():
-            return
-        if not hasattr(self, '_last_processing'):
-            return
+        """Handles the 'NG' button click. Records the image in the NG list and moves on."""
+        if not self.btn_ng.isEnabled() or not hasattr(self, '_last_processing'): return
         path = self._last_processing['path']
-        features = self._last_processing.get('particle_features', [])
-
-        method = self.cmb_method.currentText()
-        entry = {
-            'timestamp': datetime.now().isoformat(),
-            'filename': os.path.basename(path),
-            'mode': self.current_mode,
-            'result': 'NG',
-            'num_contours': len(features) if features is not None else 0,
-            'threshold_method': method,
-            'manual_threshold': (self.slider_manual.value() if method == 'manual' else 'N/A'),
-            'adaptive_blocksize': (self.spin_adapt_bs.value() if method == 'adaptive' else 'N/A'),
-            'adaptive_C': (self.spin_adapt_C.value() if method == 'adaptive' else 'N/A'),
-            'overlay_path': '',
-            'individual_csv_path': '',
-            'summary_updated': 'False',
-            'error_message': ''
-        }
-        self.append_processing_log(entry)
-
-        # processed_files に追記して progress.json を保存
+        
+        if self.current_mode == 'initial': self.ng_list.append(path)
+        else: self.reprocess_ng_list.append(path)
+            
         self.processed_files.append({'filename': os.path.basename(path), 'result': 'NG'})
         self.save_progress()
-
-        if self.current_mode == 'initial':
-            self.ng_list.append(path)
-        else:
-            self.reprocess_ng_list.append(path)
-        self.lbl_status.setText(f"Marked NG: {os.path.basename(path)}")
         self.next_index()
 
-    # 次インデックス処理
     def next_index(self):
-        if self.current_mode == 'initial':
-            self.current_index += 1
-            if self.current_index >= len(self.image_list):
-                self.finish_initial_pass()
-                return
-            self.process_and_show_current()
-        else:
-            self.current_index += 1
-            if self.current_index >= len(self.image_list):
-                self.finish_reprocess_pass()
-                return
-            self.process_and_show_current()
-
-    def prev_image(self):
-        if self.current_index > 0:
-            self.current_index -= 1
-            self.process_and_show_current()
-
-    def next_image(self):
-        # 強制的に NG 扱いで次へ
-        self.mark_ng_and_next()
-
-    def finish_initial_pass(self):
-        self.btn_ok.setEnabled(False)
-        self.btn_ng.setEnabled(False)
-        self.btn_next.setEnabled(False)
-        self.btn_prev.setEnabled(False)
-        self.btn_start_initial.setEnabled(True)
-        if self.ng_list:
-            self.btn_start_reprocess_ng.setEnabled(True)
-            QMessageBox.information(self, "Initial Pass Complete", f"Initial pass complete.\nNG images: {len(self.ng_list)}.\nYou may reprocess them in batch using 'Start Reprocess NG (batch)'.")
-        else:
-            QMessageBox.information(self, "Initial Pass Complete", "Initial pass complete.\nNo NG images.")
-        self.progress_bar.setValue(len(self.image_list))
-        self.progress_label.setText(f"Progress: {len(self.image_list)}/{len(self.image_list)}")
-
-        # 完了時には progress.json を削除して内部状態をクリア
-        self.clear_progress()
-
-    def start_reprocess_ng(self):
-        if not self.ng_list:
-            QMessageBox.information(self, "No NG images", "There are no NG images to reprocess.")
-            return
-        ret = QMessageBox.question(self, "Reprocess NG",
-                                   f"{len(self.ng_list)} images will be reprocessed using the current threshold settings.\nProceed?",
-                                   QMessageBox.Yes | QMessageBox.No)
-        if ret != QMessageBox.Yes:
-            return
-
-        # reprocessではMethod選択はそのまま（UIのグレーアウトもそのまま）
-        self.image_list = list(self.ng_list)
-        self.current_index = 0
-        self.current_mode = 'reprocess'
-        self.reprocess_ng_list = []
-
-        # processed_files はそのまま残しておく（履歴）
-        # UI
-        self.btn_ok.setEnabled(True)
-        self.btn_ng.setEnabled(True)
-        self.btn_next.setEnabled(True)
-        self.btn_prev.setEnabled(True)
-        self.btn_start_initial.setEnabled(False)
-        self.btn_start_reprocess_ng.setEnabled(False)
-
-        self.progress_bar.setMaximum(len(self.image_list))
-        self.progress_bar.setValue(0)
-        self.progress_label.setText(f"Reprocess: 0/{len(self.image_list)}")
-
-        # save state
-        self.save_progress()
-
+        """Increments the index and processes the next image."""
+        self.current_index += 1
         self.process_and_show_current()
 
+    def prev_image(self):
+        """Decrements the index to re-process the previous image."""
+        if self.current_index > 0:
+            self.current_index -= 1
+            # Remove the processing result of the previous image from the list
+            if self.processed_files:
+                last_file = os.path.basename(self.image_list[self.current_index])
+                if self.processed_files[-1]['filename'] == last_file:
+                    entry = self.processed_files.pop()
+                    if entry['result'] == 'NG':
+                        path = self.image_list[self.current_index]
+                        if self.current_mode == 'initial' and path in self.ng_list: self.ng_list.remove(path)
+                        elif self.current_mode == 'reprocess' and path in self.reprocess_ng_list: self.reprocess_ng_list.remove(path)
+            self.save_progress()
+            self.process_and_show_current()
+
+    def next_image(self): 
+        """Handles the 'Next (as NG)' button click."""
+        self.mark_ng_and_next()
+
+    def _end_pass_ui_state(self):
+        """Sets the UI state when a pass (initial or reprocess) is completed."""
+        self.btn_ok.setEnabled(False); self.btn_ng.setEnabled(False); self.btn_prev.setEnabled(False); self.btn_next.setEnabled(False)
+        self.btn_start.setEnabled(True)
+        self.progress_bar.setValue(len(self.image_list))
+
+    def finish_initial_pass(self):
+        """Logic for when the initial pass is complete."""
+        self._end_pass_ui_state()
+        if self.ng_list:
+            msg = f"Initial processing complete. There are {len(self.ng_list)} NG images.\nPress 'Start / Resume' to begin reprocessing."
+            self.lbl_status.setText("Initial pass complete. NG images found.")
+            QMessageBox.information(self, "Initial Pass Complete", msg)
+            self.save_progress()
+        else:
+            QMessageBox.information(self, "Initial Pass Complete", "Initial processing complete. There are no NG images.")
+            self.lbl_status.setText("Processing Complete.")
+            self.btn_start.setEnabled(False)
+            self.save_progress(completed=True)
+
     def finish_reprocess_pass(self):
-        self.btn_ok.setEnabled(False)
-        self.btn_ng.setEnabled(False)
-        self.btn_next.setEnabled(False)
-        self.btn_prev.setEnabled(False)
-        self.btn_start_initial.setEnabled(True)
-        kept = [p for p in self.image_list if p not in self.reprocess_ng_list]
-        left = len(self.reprocess_ng_list)
-        QMessageBox.information(self, "Reprocess Complete", f"Reprocess complete.\nSaved (OK) from reprocess: {len(kept)}\nRemaining NG: {left}")
-        self.current_mode = 'initial'
+        """Logic for when a reprocessing pass is complete."""
+        self._end_pass_ui_state()
         self.ng_list = list(self.reprocess_ng_list)
         self.reprocess_ng_list = []
         if self.ng_list:
-            self.btn_start_reprocess_ng.setEnabled(True)
+            msg = f"Reprocessing complete. {len(self.ng_list)} NG images remain.\nPress 'Start / Resume' to reprocess them again."
+            self.lbl_status.setText("Reprocessing complete. Some NG images remain.")
+            QMessageBox.information(self, "Reprocess Pass Complete", msg)
+            self.save_progress()
         else:
-            self.btn_start_reprocess_ng.setEnabled(False)
-
-        # reprocess 完了後も processed_files は残る。必要なら clear_progress() を呼ぶ。
+            QMessageBox.information(self, "Reprocess Pass Complete", "Reprocessing complete. All images have been marked OK.")
+            self.lbl_status.setText("Processing Complete.")
+            self.btn_start.setEnabled(False)
+            self.save_progress(completed=True)
 
     def closeEvent(self, event):
-        reply = QMessageBox.question(self, 'Quit', 'Quit application?', QMessageBox.Yes | QMessageBox.No)
-        if reply == QMessageBox.Yes:
-            # アプリ終了時、安全のため進捗を保存
-            try:
-                self.save_progress()
-            except Exception:
-                pass
-            event.accept()
+        """Handles the window close event. Shows a confirmation dialog if processing is active."""
+        if not self.btn_start.isEnabled(): # If a processing session is active
+             reply = QMessageBox.question(self, 'Confirm Exit', 
+                'A processing session is in progress. Do you want to exit?\n(Progress will be saved automatically)', 
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+             if reply == QMessageBox.Yes:
+                 self.save_progress()
+                 event.accept()
+             else:
+                 event.ignore()
         else:
-            event.ignore()
+            event.accept()
 
-
-# ------------------ main ------------------
-
+# ------------------ Main Execution Block ------------------
 def main():
     app = QApplication(sys.argv)
     gui = PIPGui()
