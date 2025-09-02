@@ -90,10 +90,21 @@ def process_image_get_features(img_path, threshold_method='otsu', manual_thresho
         contours, _ = contours_info
 
     particle_features = []
-    overlay_img = cv2.cvtColor(img_crop, cv2.COLOR_GRAY2BGR)
 
-    for i, cnt in enumerate(contours):
-        area = cv2.contourArea(cnt)  # pixel-based area
+    overlay_img = cv2.cvtColor(img_crop, cv2.COLOR_GRAY2BGR)
+    mask = np.zeros_like(overlay_img)  # マスク画像
+
+    for cnt in contours:
+        # ランダムカラー
+        color = (int(np.random.randint(0, 256)),
+                 int(np.random.randint(0, 256)),
+                 int(np.random.randint(0, 256)))
+
+        # マスクに塗りつぶし
+        cv2.drawContours(mask, [cnt], -1, color, thickness=-1)
+
+        # 特徴量計算（既存コード）
+        area = cv2.contourArea(cnt)
         if area == 0:
             continue
         perimeter = cv2.arcLength(cnt, True)
@@ -106,14 +117,14 @@ def process_image_get_features(img_path, threshold_method='otsu', manual_thresho
 
         moments = cv2.moments(cnt)
         hu_moments = cv2.HuMoments(moments).flatten()
-
         features = [perimeter, area, aspect_ratio, solidity, circularity] + hu_moments.tolist()
         particle_features.append(features)
 
-        cv2.drawContours(overlay_img, [cnt], -1, (0, 0, 255), 1)
-        cv2.putText(overlay_img, str(i+1), (x, max(10, y-2)), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 255, 0), 1)
+    # 半透明合成（alpha=0.5）
+    overlay_img = cv2.addWeighted(overlay_img, 1.0, mask, 0.5, 0)
 
     return overlay_img, particle_features
+
 
 # ------------------ OpenCV->QPixmap ------------------
 
