@@ -132,10 +132,10 @@ def cv2_to_qpixmap(cv_bgr):
 
 # ------------------ GUI ------------------
 
-class SEMGui(QWidget):
+class PIPGui(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("SEM Image Reviewer")
+        self.setWindowTitle("Particle Image Processor")
         self.resize(1100, 700)
 
         # 状態
@@ -714,7 +714,7 @@ class SEMGui(QWidget):
 
 def main():
     app = QApplication(sys.argv)
-    gui = SEMGui()
+    gui = PIPGui()
     gui.show()
     sys.exit(app.exec_())
 
