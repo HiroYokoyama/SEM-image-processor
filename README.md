@@ -6,3 +6,4 @@ Created with ChatGPT
 # Install dependencies
 `pip install pyqt5 opencv-python-headless numpy pandas scikit-image`
 
+# Run
