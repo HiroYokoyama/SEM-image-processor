@@ -89,21 +89,30 @@ def process_image_get_features(img_path, threshold_method='otsu', manual_thresho
     else:
         contours, _ = contours_info
 
+   
     particle_features = []
-
     overlay_img = cv2.cvtColor(img_crop, cv2.COLOR_GRAY2BGR)
-    mask = np.zeros_like(overlay_img)  # マスク画像
+    mask = np.zeros_like(overlay_img)
 
-    for cnt in contours:
-        # ランダムカラー
+    for i, cnt in enumerate(contours):
         color = (int(np.random.randint(0, 256)),
                  int(np.random.randint(0, 256)),
                  int(np.random.randint(0, 256)))
 
-        # マスクに塗りつぶし
         cv2.drawContours(mask, [cnt], -1, color, thickness=-1)
 
-        # 特徴量計算（既存コード）
+        # 粒子番号（重心に描画）
+        M = cv2.moments(cnt)
+        if M["m00"] != 0:
+            cx = int(M["m10"] / M["m00"])
+            cy = int(M["m01"] / M["m00"])
+        else:
+            cx, cy = 0, 0
+
+        cv2.putText(mask, str(i + 1), (cx, cy),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2, cv2.LINE_AA)
+
+        # 特徴量計算
         area = cv2.contourArea(cnt)
         if area == 0:
             continue
@@ -114,15 +123,12 @@ def process_image_get_features(img_path, threshold_method='otsu', manual_thresho
         hull_area = cv2.contourArea(hull)
         solidity = float(area) / hull_area if hull_area != 0 else 0
         circularity = 4 * np.pi * area / (perimeter ** 2) if perimeter != 0 else 0
-
         moments = cv2.moments(cnt)
         hu_moments = cv2.HuMoments(moments).flatten()
         features = [perimeter, area, aspect_ratio, solidity, circularity] + hu_moments.tolist()
         particle_features.append(features)
 
-    # 半透明合成（alpha=0.5）
     overlay_img = cv2.addWeighted(overlay_img, 1.0, mask, 0.5, 0)
-
     return overlay_img, particle_features
 
 
@@ -552,19 +558,6 @@ class PIPGui(QWidget):
             QMessageBox.warning(self, "Save error", f"Failed to save individual CSV for {path}:\n{e}")
 
         overlay_path = os.path.join(self.output_overlay_folder, os.path.basename(path))
-
-        # ★ インデックス番号を画像に書き込む処理を追加
-        index_text = f"#{self.current_index + 1}"
-        cv2.putText(
-            overlay,                # 描画対象画像
-            index_text,             # 表示するテキスト
-            (30, 50),               # 表示位置 (x, y)
-            cv2.FONT_HERSHEY_SIMPLEX,  # フォント
-            2,                      # フォントスケール
-            (0, 0, 255),            # 赤色 (BGR)
-            4,                      # 太さ
-            cv2.LINE_AA             # アンチエイリアス
-        )
 
         try:
             cv2.imwrite(overlay_path, overlay)
