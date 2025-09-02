@@ -101,7 +101,7 @@ def process_image_get_features(img_path, threshold_method='otsu', manual_thresho
 
         cv2.drawContours(mask, [cnt], -1, color, thickness=-1)
 
-        # 粒子番号（重心に描画）
+        # 重心を計算
         M = cv2.moments(cnt)
         if M["m00"] != 0:
             cx = int(M["m10"] / M["m00"])
@@ -109,8 +109,9 @@ def process_image_get_features(img_path, threshold_method='otsu', manual_thresho
         else:
             cx, cy = 0, 0
 
+        # ★ 赤い小さめの番号を描画
         cv2.putText(mask, str(i + 1), (cx, cy),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2, cv2.LINE_AA)
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1, cv2.LINE_AA)
 
         # 特徴量計算
         area = cv2.contourArea(cnt)
