@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Particle Image Processor
+Particle Image Processor (with progress save/resume)
 github.com/HiroYokoyama/particle-image-processor
-particle-ip.py
+保存: particle-ip.py
 依存: PyQt5, opencv-python (or opencv-python-headless), numpy, pandas, scikit-image (一部method)
 """
 
@@ -14,6 +14,7 @@ import cv2
 import numpy as np
 import pandas as pd
 import csv
+import json
 from datetime import datetime
 
 try:
@@ -31,8 +32,15 @@ from PyQt5.QtGui import QPixmap, QImage, QKeySequence
 from PyQt5.QtCore import Qt
 
 # ------------------ 画像処理関数 ------------------
+
 def process_image_get_features(img_path, threshold_method='otsu', manual_threshold=128,
                                adaptive_blocksize=11, adaptive_C=2):
+    """
+    戻り値:
+      overlay_img (BGR numpy), particle_features (list)
+    features = [perimeter, area, aspect_ratio, solidity, circularity, hu1..hu7]
+    粒子ごとに赤い小さめの番号を表示する（重心に描画）。
+    """
     img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
     if img is None:
         raise ValueError(f"Cannot read image: {img_path}")
@@ -41,21 +49,48 @@ def process_image_get_features(img_path, threshold_method='otsu', manual_thresho
     img_crop = img[:int(0.9*h), :].copy()
     img_blur = cv2.GaussianBlur(img_crop, (3,3), 0)
 
-    # 二値化処理
+    # 二値化
     if threshold_method == 'otsu':
         _, thresh = cv2.threshold(img_blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     elif threshold_method == 'manual':
-        _, thresh = cv2.threshold(img_blur, manual_threshold, 255, cv2.THRESH_BINARY)
+        _, thresh = cv2.threshold(img_blur, int(manual_threshold), 255, cv2.THRESH_BINARY)
+    elif threshold_method == 'li':
+        if not SKIMAGE_AVAILABLE:
+            raise RuntimeError("scikit-imageが必要です: pip install scikit-image")
+        li_thresh = threshold_li(img_blur)
+        _, thresh = cv2.threshold(img_blur, li_thresh, 255, cv2.THRESH_BINARY)
+    elif threshold_method == 'triangle':
+        if not SKIMAGE_AVAILABLE:
+            raise RuntimeError("scikit-imageが必要です: pip install scikit-image")
+        tri_thresh = threshold_triangle(img_blur)
+        _, thresh = cv2.threshold(img_blur, tri_thresh, 255, cv2.THRESH_BINARY)
+    elif threshold_method == 'yen':
+        if not SKIMAGE_AVAILABLE:
+            raise RuntimeError("scikit-imageが必要です: pip install scikit-image")
+        yen_thresh = threshold_yen(img_blur)
+        _, thresh = cv2.threshold(img_blur, yen_thresh, 255, cv2.THRESH_BINARY)
+    elif threshold_method == 'isodata':
+        if not SKIMAGE_AVAILABLE:
+            raise RuntimeError("scikit-imageが必要です: pip install scikit-image")
+        iso_thresh = threshold_isodata(img_blur)
+        _, thresh = cv2.threshold(img_blur, iso_thresh, 255, cv2.THRESH_BINARY)
     elif threshold_method == 'adaptive':
-        thresh = cv2.adaptiveThreshold(img_blur, 255, cv2.ADAPTIVE_THRESH_MEAN_C,
-                                       cv2.THRESH_BINARY, adaptive_blocksize, adaptive_C)
+        bs = int(adaptive_blocksize)
+        if bs % 2 == 0:
+            bs = bs + 1
+        if bs < 3:
+            bs = 3
+        thresh = cv2.adaptiveThreshold(img_blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                       cv2.THRESH_BINARY, bs, int(adaptive_C))
     else:
-        # デフォルトはOTSU
-        _, thresh = cv2.threshold(img_blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        raise ValueError(f"Unknown threshold method: {threshold_method}")
 
-    # 輪郭検出
     contours_info = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    contours = contours_info[1] if len(contours_info) == 3 else contours_info[0]
+    # OpenCV のバージョン差に対応
+    if len(contours_info) == 3:
+        _, contours, _ = contours_info
+    else:
+        contours, _ = contours_info
 
     particle_features = []
     overlay_img = cv2.cvtColor(img_crop, cv2.COLOR_GRAY2BGR)
@@ -66,17 +101,20 @@ def process_image_get_features(img_path, threshold_method='otsu', manual_thresho
                  int(np.random.randint(0, 256)),
                  int(np.random.randint(0, 256)))
 
+        # マスクに塗りつぶし
         cv2.drawContours(mask, [cnt], -1, color, thickness=-1)
 
-        # 重心を計算
+        # 粒子番号（重心に描画） — 赤, 小さめ
         M = cv2.moments(cnt)
-        if M["m00"] != 0:
+        if M.get("m00", 0) != 0:
             cx = int(M["m10"] / M["m00"])
             cy = int(M["m01"] / M["m00"])
         else:
-            cx, cy = 0, 0
+            # fallback: bounding rect center
+            x, y, w_c, h_c = cv2.boundingRect(cnt)
+            cx = x + w_c // 2
+            cy = y + h_c // 2
 
-        # ★ 赤い小さめの番号を描画
         cv2.putText(mask, str(i + 1), (cx, cy),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1, cv2.LINE_AA)
 
@@ -91,14 +129,16 @@ def process_image_get_features(img_path, threshold_method='otsu', manual_thresho
         hull_area = cv2.contourArea(hull)
         solidity = float(area) / hull_area if hull_area != 0 else 0
         circularity = 4 * np.pi * area / (perimeter ** 2) if perimeter != 0 else 0
+
         moments = cv2.moments(cnt)
         hu_moments = cv2.HuMoments(moments).flatten()
         features = [perimeter, area, aspect_ratio, solidity, circularity] + hu_moments.tolist()
         particle_features.append(features)
 
+    # 半透明合成（alpha=0.5）
     overlay_img = cv2.addWeighted(overlay_img, 1.0, mask, 0.5, 0)
-    return overlay_img, particle_features
 
+    return overlay_img, particle_features
 
 
 # ------------------ OpenCV->QPixmap ------------------
@@ -116,6 +156,7 @@ def cv2_to_qpixmap(cv_bgr):
     bytes_per_line = ch * w
     qimg = QImage(rgb.data, w, h, bytes_per_line, QImage.Format_RGB888)
     return QPixmap.fromImage(qimg)
+
 
 # ------------------ GUI ------------------
 
@@ -135,6 +176,7 @@ class PIPGui(QWidget):
         self.output_individual_csv_folder = ''
         self.summary_csv_path = ''
         self.processing_log_path = ''
+        self.processed_files = []   # [{'filename': '...', 'result': 'OK'/'NG'}, ...]
 
         # ログヘッダ (面積はログに含めない)
         self.log_headers = [
@@ -287,6 +329,56 @@ class PIPGui(QWidget):
         sc_ng.setContext(Qt.ApplicationShortcut)
         sc_ng.activated.connect(lambda: self._shortcut_trigger('ng'))
 
+    # ---------------- progress JSON helpers ----------------
+    def get_progress_path(self):
+        """出力フォルダに保存する progress.json のパスを返す。出力フォルダ未指定なら None を返す。"""
+        base = self.le_output_folder.text().strip()
+        if not base:
+            return None
+        return os.path.join(base, "progress.json")
+
+    def save_progress(self):
+        """現在の進捗を progress.json に保存する。OK/NG 毎に呼ぶ。"""
+        ppath = self.get_progress_path()
+        if not ppath:
+            return
+        data = {
+            "mode": self.current_mode,
+            "current_index": self.current_index,
+            "processed_files": list(self.processed_files),
+            "input_folder": self.le_image_folder.text().strip(),
+            "output_folder": self.le_output_folder.text().strip(),
+            "timestamp": datetime.now().isoformat()
+        }
+        try:
+            with open(ppath, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            QMessageBox.warning(self, "Save Progress error", f"Failed to save progress:\n{e}")
+
+    def load_progress(self):
+        """progress.json を読み込んで dict を返す。無ければ None を返す。"""
+        ppath = self.get_progress_path()
+        if not ppath or not os.path.exists(ppath):
+            return None
+        try:
+            with open(ppath, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            return data
+        except Exception as e:
+            QMessageBox.warning(self, "Load Progress error", f"Failed to load progress:\n{e}")
+            return None
+
+    def clear_progress(self):
+        """progress.json を削除し、内部の processed_files をクリア（主に新規開始時に使用）。"""
+        ppath = self.get_progress_path()
+        if ppath and os.path.exists(ppath):
+            try:
+                os.remove(ppath)
+            except Exception as e:
+                QMessageBox.warning(self, "Clear Progress error", f"Failed to remove progress file:\n{e}")
+        self.processed_files = []
+
     # ショートカット処理
     def _shortcut_trigger(self, kind):
         if kind == 'ok' and self.btn_ok.isEnabled():
@@ -384,23 +476,82 @@ class PIPGui(QWidget):
         if not imgs:
             QMessageBox.warning(self, "No images", "No images found in the selected folder.")
             return
+
+        base_out = self.le_output_folder.text().strip()
+        if not base_out:
+            QMessageBox.warning(self, "No output folder", "Please set output folder before starting.")
+            return
+
+        # progress.json の存在チェックと再開/新規/キャンセルのダイアログ
+        ppath = os.path.join(base_out, "progress.json")
+        if os.path.exists(ppath):
+            ret = QMessageBox.question(
+                self,
+                "Resume or Start New?",
+                "A previous progress file was found. Do you want to resume the previous run?\n\n"
+                "Yes: Resume previous progress\nNo: Start a new run (this will discard the saved progress)\nCancel: Abort",
+                QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel
+            )
+            if ret == QMessageBox.Cancel:
+                return
+            elif ret == QMessageBox.No:
+                # 新規開始：保存を削除して続行
+                try:
+                    os.remove(ppath)
+                except Exception:
+                    pass
+                self.processed_files = []
+            else:
+                # Resume: 読み込んで現在状態に反映
+                try:
+                    with open(ppath, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                    saved_mode = data.get("mode", "initial")
+                    saved_processed = data.get("processed_files", [])
+                    saved_input = data.get("input_folder", "")
+                    # 警告: 入力フォルダが異なる場合は通知する（ファイル名でマッチする）
+                    if saved_input and saved_input != self.le_image_folder.text().strip():
+                        QMessageBox.information(self, "Warning", "Saved progress input folder differs from current selection. We'll try to match files by filename.")
+                    self.current_mode = saved_mode
+                    self.processed_files = saved_processed
+                    # 最新の画像リストで再構築
+                    imgs = self._gather_image_list()
+                    self.image_list = imgs
+                    # processed_files の最後のファイル名を探して次の index から再開
+                    last_done_idx = -1
+                    if self.processed_files:
+                        last_filename = self.processed_files[-1].get("filename")
+                        for idx, p in enumerate(self.image_list):
+                            if os.path.basename(p) == last_filename:
+                                last_done_idx = idx
+                                break
+                    self.current_index = last_done_idx + 1
+                except Exception as e:
+                    QMessageBox.warning(self, "Resume error", f"Failed to resume progress file, starting fresh.\n{e}")
+                    self.processed_files = []
+
+        # 出力フォルダ準備
         try:
             self._prepare_output_folders()
         except Exception as e:
             QMessageBox.critical(self, "Output folder error", str(e))
             return
 
-        # 更新（メソッドに応じたパラメータUIの状態が反映されていることを保証）
-        self.update_param_fields()
-
-        self.image_list = imgs
-        self.current_index = 0
-        self.ng_list = []
-        self.current_mode = 'initial'
+        # 初期化（resumeがセットしていなければ）
+        if not getattr(self, "image_list", None):
+            self.image_list = imgs
+            self.current_index = 0
+            self.ng_list = []
+            self.current_mode = 'initial'
+        else:
+            # image_list は resume により既にセットされている可能性あり
+            if not self.image_list:
+                self.image_list = imgs
+                self.current_index = 0
 
         self.progress_bar.setMaximum(len(self.image_list))
-        self.progress_bar.setValue(0)
-        self.progress_label.setText(f"Progress: 0/{len(self.image_list)}")
+        self.progress_bar.setValue(self.current_index)
+        self.progress_label.setText(f"Progress: {self.current_index}/{len(self.image_list)}")
 
         self.btn_ok.setEnabled(True)
         self.btn_ng.setEnabled(True)
@@ -408,6 +559,9 @@ class PIPGui(QWidget):
         self.btn_prev.setEnabled(True)
         self.btn_start_initial.setEnabled(False)
         self.btn_start_reprocess_ng.setEnabled(False)
+
+        # 保存しておく（再開情報）
+        self.save_progress()
 
         self.process_and_show_current()
 
@@ -426,7 +580,6 @@ class PIPGui(QWidget):
                     adaptive_C=self.spin_adapt_C.value()
                 )
             except Exception as e:
-                # ログに ERROR を記録（使われないパラメータは N/A）
                 entry = {
                     'timestamp': datetime.now().isoformat(),
                     'filename': os.path.basename(path),
@@ -443,9 +596,11 @@ class PIPGui(QWidget):
                     'error_message': str(e)
                 }
                 self.append_processing_log(entry)
-
                 QMessageBox.critical(self, "Processing error", f"Error processing {path}:\n{e}")
                 self.ng_list.append(path)
+                # mark as processed ERROR in processed_files and save
+                self.processed_files.append({'filename': os.path.basename(path), 'result': 'ERROR'})
+                self.save_progress()
                 self.next_index()
                 return
 
@@ -488,9 +643,11 @@ class PIPGui(QWidget):
                     'error_message': str(e)
                 }
                 self.append_processing_log(entry)
-
                 QMessageBox.critical(self, "Processing error", f"Error processing {path}:\n{e}")
                 self.reprocess_ng_list.append(path)
+                # processed_files に ERROR として保存
+                self.processed_files.append({'filename': os.path.basename(path), 'result': 'ERROR'})
+                self.save_progress()
                 self.next_index()
                 return
 
@@ -513,7 +670,7 @@ class PIPGui(QWidget):
         path = info['path']
         overlay = info['overlay_bgr']
         features = info['particle_features']
-    
+
         base_name = os.path.splitext(os.path.basename(path))[0]
         cols_ind = ['perimeter','area','aspect_ratio','solidity','circularity'] + [f'hu{i+1}' for i in range(7)]
         if features:
@@ -532,7 +689,7 @@ class PIPGui(QWidget):
             cv2.imwrite(overlay_path, overlay)
         except Exception as e:
             QMessageBox.warning(self, "Save error", f"Failed to save overlay image for {path}:\n{e}")
-    
+
         summary_cols = ['filename','perimeter','area','aspect_ratio','solidity','circularity'] + [f'hu{i+1}' for i in range(7)]
         if features:
             mean_features = np.mean(np.array(features), axis=0).tolist()
@@ -550,7 +707,7 @@ class PIPGui(QWidget):
             summary_updated = True
         except Exception as e:
             QMessageBox.warning(self, "Summary save error", f"Failed to update summary CSV:\n{e}")
-    
+
         method = self.cmb_method.currentText()
         entry = {
             'timestamp': datetime.now().isoformat(),
@@ -568,12 +725,15 @@ class PIPGui(QWidget):
             'error_message': ''
         }
         self.append_processing_log(entry)
-    
+
+        # processed_files に追記して progress.json を保存
+        self.processed_files.append({'filename': os.path.basename(path), 'result': 'OK'})
+        self.save_progress()
+
         self.lbl_status.setText(f"Saved: {base_name}")
         self.next_index()
-    
-        
-        # NG 取扱い
+
+    # NG 取扱い
     def mark_ng_and_next(self):
         if not self.btn_ng.isEnabled():
             return
@@ -599,6 +759,10 @@ class PIPGui(QWidget):
             'error_message': ''
         }
         self.append_processing_log(entry)
+
+        # processed_files に追記して progress.json を保存
+        self.processed_files.append({'filename': os.path.basename(path), 'result': 'NG'})
+        self.save_progress()
 
         if self.current_mode == 'initial':
             self.ng_list.append(path)
@@ -645,6 +809,9 @@ class PIPGui(QWidget):
         self.progress_bar.setValue(len(self.image_list))
         self.progress_label.setText(f"Progress: {len(self.image_list)}/{len(self.image_list)}")
 
+        # 完了時には progress.json を削除して内部状態をクリア
+        self.clear_progress()
+
     def start_reprocess_ng(self):
         if not self.ng_list:
             QMessageBox.information(self, "No NG images", "There are no NG images to reprocess.")
@@ -661,6 +828,8 @@ class PIPGui(QWidget):
         self.current_mode = 'reprocess'
         self.reprocess_ng_list = []
 
+        # processed_files はそのまま残しておく（履歴）
+        # UI
         self.btn_ok.setEnabled(True)
         self.btn_ng.setEnabled(True)
         self.btn_next.setEnabled(True)
@@ -671,6 +840,9 @@ class PIPGui(QWidget):
         self.progress_bar.setMaximum(len(self.image_list))
         self.progress_bar.setValue(0)
         self.progress_label.setText(f"Reprocess: 0/{len(self.image_list)}")
+
+        # save state
+        self.save_progress()
 
         self.process_and_show_current()
 
@@ -691,12 +863,20 @@ class PIPGui(QWidget):
         else:
             self.btn_start_reprocess_ng.setEnabled(False)
 
+        # reprocess 完了後も processed_files は残る。必要なら clear_progress() を呼ぶ。
+
     def closeEvent(self, event):
         reply = QMessageBox.question(self, 'Quit', 'Quit application?', QMessageBox.Yes | QMessageBox.No)
         if reply == QMessageBox.Yes:
+            # アプリ終了時、安全のため進捗を保存
+            try:
+                self.save_progress()
+            except Exception:
+                pass
             event.accept()
         else:
             event.ignore()
+
 
 # ------------------ main ------------------
 
