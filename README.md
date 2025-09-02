@@ -1,2 +1,2 @@
-# SEM-image-processor
-SEM image processor for particle analysis
+# SEM-image-processor with GUI
+SEM image processor for particle analysis with GUI
