@@ -3,7 +3,7 @@
 """
 Particle Image Processor
 github.com/HiroYokoyama/particle-image-processor
-保存: particle-ip.py
+particle-ip.py
 依存: PyQt5, opencv-python (or opencv-python-headless), numpy, pandas, scikit-image (一部method)
 """
 
