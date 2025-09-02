@@ -4,5 +4,5 @@ Particle image processor for particle analysis with GUI
 Created with ChatGPT
 
 # Install
-pip install pyqt5 opencv-python-headless numpy pandas scikit-image
+`pip install pyqt5 opencv-python-headless numpy pandas scikit-image`
 
