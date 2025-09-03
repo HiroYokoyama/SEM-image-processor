@@ -152,6 +152,8 @@ class PIPGui(QWidget):
         self.summary_csv_path = ''
         self.processing_log_path = ''
         self.processed_files = []
+        self.original_start_button_style = "font-size: 16px; background-color: #2196F3; color: white;"
+
 
         # Log file headers
         self.log_headers = [
@@ -206,7 +208,7 @@ class PIPGui(QWidget):
 
         # Right Panel: Controls
         right_v = QVBoxLayout()
-        folder_box = QGroupBox("Folder Settings")
+        self.folder_box = QGroupBox("Folder Settings")
         folder_layout = QFormLayout()
         self.le_image_folder = QLineEdit()
         self.le_image_folder.textChanged.connect(self.update_start_button_state)
@@ -218,8 +220,8 @@ class PIPGui(QWidget):
         self.btn_output_folder = QPushButton("Select Output Folder")
         self.btn_output_folder.clicked.connect(self.choose_output_folder)
         folder_layout.addRow(self.btn_output_folder, self.le_output_folder)
-        folder_box.setLayout(folder_layout)
-        right_v.addWidget(folder_box)
+        self.folder_box.setLayout(folder_layout)
+        right_v.addWidget(self.folder_box)
 
         # Binarization Settings
         thresh_box = QGroupBox("Binarization Settings")
@@ -250,7 +252,7 @@ class PIPGui(QWidget):
         # Start Button
         self.btn_start = QPushButton("Start / Resume")
         self.btn_start.setFixedHeight(40)
-        self.btn_start.setStyleSheet("font-size: 16px; background-color: #2196F3; color: white;")
+        self.btn_start.setStyleSheet(self.original_start_button_style)
         self.btn_start.clicked.connect(self.start_or_resume_processing)
         right_v.addWidget(self.btn_start)
 
@@ -335,19 +337,11 @@ class PIPGui(QWidget):
         if d: self.le_output_folder.setText(d)
         
     def update_start_button_state(self):
-        """Enables/disables the start button based on folder selection and image file presence."""
-        image_folder = self.le_image_folder.text().strip()
+        """Enables/disables the start button based on folder selection."""
         output_folder = self.le_output_folder.text().strip()
 
-        if not image_folder or not output_folder or not os.path.isdir(image_folder):
-            self.btn_start.setEnabled(False)
-            return
-        
-        # Check if at least one image file exists
-        exts = ('*.png', '*.jpg', '*.jpeg', '*.tif', '*.tiff', '*.bmp')
-        has_images = any(glob.glob(os.path.join(image_folder, e)) for e in exts)
-        
-        self.btn_start.setEnabled(has_images)
+        # The primary requirement is a valid output folder.
+        self.btn_start.setEnabled(bool(output_folder and os.path.isdir(output_folder)))
         
         # Check for completed status but keep Start button enabled.
         progress_data = self.load_progress()
@@ -427,6 +421,18 @@ class PIPGui(QWidget):
 
         progress_data = self.load_progress()
         
+        # If image folder is empty, try to load it from the progress file
+        if not self.le_image_folder.text().strip() and progress_data:
+            saved_input = progress_data.get("input_folder")
+            if saved_input and os.path.isdir(saved_input):
+                self.le_image_folder.setText(saved_input)
+            else:
+                QMessageBox.warning(self, "Input Error", "Could not find image folder from progress file.\nPlease select an image folder to start.")
+                return
+        elif not self.le_image_folder.text().strip():
+            QMessageBox.warning(self, "Input Error", "Please select an image folder to start a new session.")
+            return
+
         if progress_data and progress_data.get("status") == "Completed":
             QMessageBox.information(self, "Completed", "Processing for this folder is already marked as complete.\nTo re-run, please delete the 'progress.json' file in the output folder.")
             self.lbl_status.setText("Processing Complete.")
@@ -470,12 +476,17 @@ class PIPGui(QWidget):
             exts = ('*.png', '*.jpg', '*.jpeg', '*.tif', '*.tiff', '*.bmp')
             folder = self.le_image_folder.text().strip()
             self.image_list = [f for e in exts for f in sorted(glob.glob(os.path.join(folder, e)))]
+            if not self.image_list:
+                QMessageBox.warning(self, "No Images Found", "The selected image folder does not contain any supported image files.")
+                return
             self.processing_queue = self.image_list[:] # The initial queue is the full list
             self.current_index = 0; self.ng_list = []; self.reprocess_ng_list = []; self.processed_files = []; self.current_mode = 'initial'
             self.save_progress()
 
         # Set the UI to the processing state
         self.btn_start.setEnabled(False)
+        self.btn_start.setStyleSheet("font-size: 16px; background-color: #ADD8E6; color: black;")
+        self.folder_box.setEnabled(False)
         self.btn_ok.setEnabled(True); self.btn_ng.setEnabled(True); self.btn_prev.setEnabled(True); self.btn_next.setEnabled(True)
         self.progress_bar.setMaximum(len(self.processing_queue))
         self.process_and_show_current()
@@ -585,6 +596,8 @@ class PIPGui(QWidget):
         """Sets the UI state when a pass (initial or reprocess) is completed."""
         self.btn_ok.setEnabled(False); self.btn_ng.setEnabled(False); self.btn_prev.setEnabled(False); self.btn_next.setEnabled(False)
         self.btn_start.setEnabled(True)
+        self.btn_start.setStyleSheet(self.original_start_button_style)
+        self.folder_box.setEnabled(True)
         self.progress_bar.setValue(len(self.processing_queue))
 
     def finish_initial_pass(self):
@@ -618,22 +631,26 @@ class PIPGui(QWidget):
     def closeEvent(self, event):
         """Handles the window close event. Shows a confirmation dialog if processing has been started."""
         # A session is considered active if the output paths have been configured by starting the process.
-        if self.processing_log_path:
-             reply = QMessageBox.question(self, 'Confirm Exit',
-                'Are you sure you want to exit?\nYour current progress will be saved.',
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-
-             if reply == QMessageBox.Yes:
-                 # Save progress unless it's already marked as fully completed.
-                 progress_data = self.load_progress()
-                 is_completed = progress_data and progress_data.get("status") == "Completed"
-                 if not is_completed:
-                     self.save_progress()
-                 event.accept()
-             else:
-                 event.ignore()
-        else:
+        if not self.processing_log_path:
             event.accept()
+            return
+
+        progress_data = self.load_progress()
+        if progress_data and progress_data.get("status") == "Completed":
+            # If already marked as complete, no need to ask or save.
+            event.accept()
+            return
+            
+        reply = QMessageBox.question(self, 'Confirm Exit',
+            'Are you sure you want to exit?\nYour current progress will be saved.',
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+
+        if reply == QMessageBox.Yes:
+            # Always save as "In Progress" when exiting mid-session.
+            self.save_progress(completed=False)
+            event.accept()
+        else:
+            event.ignore()
 
 # ------------------ Main Execution Block ------------------
 def main():
