@@ -98,6 +98,6 @@ python particle-ip.py
 
 ## License
 
-This project is open-source under the APACHE 2.0 License.
+This project is open-source under the Apache 2.0 License.
 See [LICENSE](LICENSE) for details.
 
