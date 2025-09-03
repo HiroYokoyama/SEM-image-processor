@@ -1,3 +1,11 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Particle Image Processor
+github.com/HiroYokoyama/particle-image-processor
+Dependencies: PyQt5, opencv-python (or opencv-python-headless), numpy, pandas, scikit-image (for some methods)
+"""
+
 import sys
 import os
 import glob
