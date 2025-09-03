@@ -141,8 +141,8 @@ class PIPGui(QWidget):
         self.resize(1100, 700)
 
         # State variables
-        self.image_list = [] # The original, full list of images. This should not be modified after initial load.
-        self.processing_queue = [] # The list of images for the current pass (can be the full list or ng_list).
+        self.image_list = []
+        self.processing_queue = []
         self.current_index = -1
         self.ng_list = []
         self.reprocess_ng_list = []
@@ -152,7 +152,9 @@ class PIPGui(QWidget):
         self.summary_csv_path = ''
         self.processing_log_path = ''
         self.processed_files = []
+        self.is_processing = False
         self.original_start_button_style = "font-size: 16px; background-color: #2196F3; color: white;"
+        self.processing_start_button_style = "font-size: 16px; background-color: #ADD8E6; color: black;"
 
 
         # Log file headers
@@ -224,10 +226,9 @@ class PIPGui(QWidget):
         right_v.addWidget(self.folder_box)
 
         # Binarization Settings
-        thresh_box = QGroupBox("Binarization Settings")
+        self.thresh_box = QGroupBox("Binarization Settings")
         thresh_layout = QFormLayout()
         self.cmb_method = QComboBox()
-        # Modified list order: otsu first, then scikit-image, then manual and adaptive
         items = ['otsu']
         if SKIMAGE_AVAILABLE:
             items.extend(['li', 'triangle', 'yen', 'isodata'])
@@ -246,8 +247,8 @@ class PIPGui(QWidget):
         self.spin_adapt_C = QSpinBox(); self.spin_adapt_C.setRange(-50, 50); self.spin_adapt_C.setValue(2)
         adapt_h = QHBoxLayout(); adapt_h.addWidget(QLabel("Block Size:")); adapt_h.addWidget(self.spin_adapt_bs); adapt_h.addWidget(QLabel("C:")); adapt_h.addWidget(self.spin_adapt_C)
         thresh_layout.addRow(adapt_h)
-        thresh_box.setLayout(thresh_layout)
-        right_v.addWidget(thresh_box)
+        self.thresh_box.setLayout(thresh_layout)
+        right_v.addWidget(self.thresh_box)
 
         # Start Button
         self.btn_start = QPushButton("Start / Resume")
@@ -278,24 +279,19 @@ class PIPGui(QWidget):
         QShortcut(QKeySequence('O'), self, lambda: self.btn_ok.click() if self.btn_ok.isEnabled() else None)
         QShortcut(QKeySequence('N'), self, lambda: self.btn_ng.click() if self.btn_ng.isEnabled() else None)
         
-        # Update initial button state
         self.update_start_button_state()
 
-    # ---------------- Progress Saving (JSON) Helper Functions ----------------
     def get_progress_path(self):
-        """Returns the path to the progress file (progress.json)."""
         base = self.le_output_folder.text().strip()
         return os.path.join(base, "progress.json") if base else None
 
     def save_progress(self, completed=False):
-        """Saves the current session state to a JSON file."""
         ppath = self.get_progress_path()
         if not ppath: return
-
         data = {
             "status": "Completed" if completed else "In Progress",
             "mode": self.current_mode,
-            "image_list": self.image_list,  # Always save the original, full list
+            "image_list": self.image_list,
             "ng_list": self.ng_list,
             "reprocess_ng_list": self.reprocess_ng_list,
             "processed_files": list(self.processed_files),
@@ -310,48 +306,37 @@ class PIPGui(QWidget):
             QMessageBox.warning(self, "Progress Save Error", f"Failed to save progress:\n{e}")
 
     def load_progress(self):
-        """Loads the session state from a JSON file."""
         ppath = self.get_progress_path()
         if not ppath or not os.path.exists(ppath): return None
         try:
             with open(ppath, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-            # Basic validation
             if "status" not in data or "image_list" not in data:
-                 QMessageBox.warning(self, "Invalid Progress File", "The progress file is old or corrupted. Starting a new session if possible.")
+                 QMessageBox.warning(self, "Invalid Progress File", "The progress file is old or corrupted.")
                  return None
             return data
         except Exception as e:
             QMessageBox.warning(self, "Progress Load Error", f"Failed to load progress:\n{e}")
             return None
 
-    # ---------------- UI and Control Logic ----------------
     def choose_image_folder(self):
-        """Opens a dialog to select the image folder."""
         d = QFileDialog.getExistingDirectory(self, "Select Image Folder", os.getcwd())
         if d: self.le_image_folder.setText(d)
 
     def choose_output_folder(self):
-        """Opens a dialog to select the output folder."""
         d = QFileDialog.getExistingDirectory(self, "Select Output Folder", os.getcwd())
         if d: self.le_output_folder.setText(d)
         
     def update_start_button_state(self):
-        """Enables/disables the start button based on folder selection."""
         output_folder = self.le_output_folder.text().strip()
-
-        # The primary requirement is a valid output folder.
         self.btn_start.setEnabled(bool(output_folder and os.path.isdir(output_folder)))
         
-        # Check for completed status but keep Start button enabled.
         progress_data = self.load_progress()
         if progress_data and progress_data.get("status") == "Completed":
             self.lbl_status.setText("This folder is marked as 'Completed'.")
-            self.btn_img_folder.setEnabled(False)
-            self.btn_output_folder.setEnabled(False)
+            self.folder_box.setEnabled(False)
 
     def update_param_fields(self):
-        """Enables/disables related UI elements based on the selected binarization method."""
         method = self.cmb_method.currentText()
         is_manual = method == 'manual'
         is_adaptive = method == 'adaptive'
@@ -360,9 +345,7 @@ class PIPGui(QWidget):
         self.spin_adapt_bs.setEnabled(is_adaptive)
         self.spin_adapt_C.setEnabled(is_adaptive)
 
-    # ---------------- Log-related Helper Functions ----------------
     def _ensure_log_initialized(self):
-        """If the log file does not exist, initialize it by writing the header."""
         if not self.processing_log_path or os.path.exists(self.processing_log_path): return
         try:
             with open(self.processing_log_path, 'w', newline='', encoding='utf-8') as f:
@@ -371,7 +354,6 @@ class PIPGui(QWidget):
             QMessageBox.warning(self, "Log Initialization Error", f"Failed to initialize the log file:\n{e}")
 
     def append_processing_log(self, entry_dict):
-        """Appends a row to the log file."""
         if not self.processing_log_path: return
         self._ensure_log_initialized()
         row = [entry_dict.get(h, '') for h in self.log_headers]
@@ -382,15 +364,11 @@ class PIPGui(QWidget):
             QMessageBox.warning(self, "Log Write Error", f"Failed to write to the log file:\n{e}")
     
     def _log_processing_event(self, result, path, features=None, error_msg=''):
-        """Helper function to create and append a log entry."""
         method = self.cmb_method.currentText()
         base_name = os.path.basename(path)
-        
         entry = {
-            'timestamp': datetime.now().isoformat(),
-            'filename': base_name,
-            'mode': self.current_mode,
-            'result': result,
+            'timestamp': datetime.now().isoformat(), 'filename': base_name,
+            'mode': self.current_mode, 'result': result,
             'num_contours': len(features) if features is not None else 0,
             'threshold_method': method,
             'manual_threshold': self.slider_manual.value() if method == 'manual' else 'N/A',
@@ -398,15 +376,15 @@ class PIPGui(QWidget):
             'adaptive_C': self.spin_adapt_C.value() if method == 'adaptive' else 'N/A',
             'overlay_path': os.path.join(self.output_overlay_folder, base_name) if result == 'OK' else '',
             'individual_csv_path': os.path.join(self.output_individual_csv_folder, f"{os.path.splitext(base_name)[0]}.csv") if result == 'OK' else '',
-            'summary_updated': result == 'OK',
-            'error_message': error_msg
+            'summary_updated': result == 'OK', 'error_message': error_msg
         }
         self.append_processing_log(entry)
 
-
-    # ---------------- Core Processing Flow ----------------
     def start_or_resume_processing(self):
-        """Main process when the 'Start/Resume' button is pressed."""
+        # --- Give immediate feedback that the button was clicked ---
+        self.btn_start.setEnabled(False)
+
+        # --- Validation Step ---
         try:
             base = self.le_output_folder.text().strip()
             self.output_overlay_folder = os.path.join(base, "overlay_images")
@@ -417,166 +395,146 @@ class PIPGui(QWidget):
             self.processing_log_path = os.path.join(base, "processing_log.csv")
         except Exception as e:
             QMessageBox.critical(self, "Output Folder Error", str(e))
+            self.btn_start.setEnabled(True) # Re-enable on error
             return
 
         progress_data = self.load_progress()
         
-        # If image folder is empty, try to load it from the progress file
-        if not self.le_image_folder.text().strip() and progress_data:
-            saved_input = progress_data.get("input_folder")
-            if saved_input and os.path.isdir(saved_input):
-                self.le_image_folder.setText(saved_input)
+        if not self.le_image_folder.text().strip():
+            if progress_data and progress_data.get("input_folder"):
+                saved_input = progress_data.get("input_folder")
+                if os.path.isdir(saved_input):
+                    self.le_image_folder.setText(saved_input)
+                else:
+                    self.lbl_status.setText("Error: Could not find original image folder.")
+                    QMessageBox.warning(self, "Input Error", "Could not find the original image folder from the progress file.\nPlease select it manually.")
+                    self.btn_start.setEnabled(True) # Re-enable on error
+                    return
             else:
-                QMessageBox.warning(self, "Input Error", "Could not find image folder from progress file.\nPlease select an image folder to start.")
+                self.lbl_status.setText("Error: Image folder is required for a new session.")
+                QMessageBox.warning(self, "Input Error", "Please select an image folder to start a new session.")
+                self.btn_start.setEnabled(True) # Re-enable on error
                 return
-        elif not self.le_image_folder.text().strip():
-            QMessageBox.warning(self, "Input Error", "Please select an image folder to start a new session.")
-            return
 
         if progress_data and progress_data.get("status") == "Completed":
-            QMessageBox.information(self, "Completed", "Processing for this folder is already marked as complete.\nTo re-run, please delete the 'progress.json' file in the output folder.")
-            self.lbl_status.setText("Processing Complete.")
+            QMessageBox.information(self, "Completed", "Processing for this folder is already marked as complete.\nTo re-run, please delete 'progress.json' in the output folder.")
+            self.btn_start.setEnabled(True) # Re-enable
             return
 
+        # --- Process Logic ---
         if progress_data and progress_data.get("status") == "In Progress":
             self.image_list = progress_data["image_list"]
             self.processed_files = progress_data.get("processed_files", [])
             self.current_mode = progress_data.get("mode", "initial")
             self.ng_list = progress_data.get("ng_list", [])
             self.reprocess_ng_list = progress_data.get("reprocess_ng_list", [])
-            
-            # Determine the correct list to process for the current session
-            if self.current_mode == 'reprocess':
-                self.processing_queue = self.ng_list
-            else:
-                self.processing_queue = self.image_list
-
+            if self.current_mode == 'reprocess': self.processing_queue = self.ng_list
+            else: self.processing_queue = self.image_list
             next_index = len(self.processed_files)
-
-            if next_index < len(self.processing_queue): # Resuming an interrupted pass
+            if next_index < len(self.processing_queue):
                 self.lbl_status.setText(f"Resuming '{self.current_mode}' mode...")
                 self.current_index = next_index
-            else: # If the pass is complete, check for NG images to start the next pass
+            else:
                 if self.ng_list:
                     self.lbl_status.setText(f"Reprocessing {len(self.ng_list)} NG images...")
-                    self.processing_queue = list(self.ng_list) # Set the new queue
+                    self.processing_queue = list(self.ng_list)
                     self.current_mode = 'reprocess'
-                    self.ng_list = []
-                    self.reprocess_ng_list = []
-                    self.processed_files = []
+                    self.ng_list = []; self.reprocess_ng_list = []; self.processed_files = []
                     self.current_index = 0
-                    self.save_progress() # Save state for the new reprocessing session
+                    self.save_progress()
                 else:
-                    QMessageBox.information(self, "Complete", "All processing is complete. There are no remaining NG images.")
+                    QMessageBox.information(self, "Complete", "All images processed. No remaining NG images.")
                     self.lbl_status.setText("Processing Complete.")
                     self.save_progress(completed=True)
+                    self.btn_start.setEnabled(True) # Re-enable
                     return
-        else: # Starting a new session
+        else: # Start a new session
             self.lbl_status.setText("Starting a new session...")
             exts = ('*.png', '*.jpg', '*.jpeg', '*.tif', '*.tiff', '*.bmp')
             folder = self.le_image_folder.text().strip()
             self.image_list = [f for e in exts for f in sorted(glob.glob(os.path.join(folder, e)))]
             if not self.image_list:
-                QMessageBox.warning(self, "No Images Found", "The selected image folder does not contain any supported image files.")
+                self.lbl_status.setText("Error: No supported image files found in the folder.")
+                QMessageBox.warning(self, "No Images Found", "The selected image folder contains no supported image files.")
+                self.btn_start.setEnabled(True) # Re-enable on error
                 return
-            self.processing_queue = self.image_list[:] # The initial queue is the full list
+            self.processing_queue = self.image_list[:]
             self.current_index = 0; self.ng_list = []; self.reprocess_ng_list = []; self.processed_files = []; self.current_mode = 'initial'
             self.save_progress()
 
-        # Set the UI to the processing state
-        self.btn_start.setEnabled(False)
-        self.btn_start.setStyleSheet("font-size: 16px; background-color: #ADD8E6; color: black;")
+        # --- Set UI to Processing State (only after all checks passed) ---
+        self.is_processing = True
+        self.btn_start.setStyleSheet(self.processing_start_button_style)
         self.folder_box.setEnabled(False)
+        self.thresh_box.setEnabled(False)
         self.btn_ok.setEnabled(True); self.btn_ng.setEnabled(True); self.btn_prev.setEnabled(True); self.btn_next.setEnabled(True)
         self.progress_bar.setMaximum(len(self.processing_queue))
         self.process_and_show_current()
 
     def process_and_show_current(self):
-        """Processes the image at the current index and displays the result."""
         if not (0 <= self.current_index < len(self.processing_queue)):
-            # If all images in the current pass have been processed
             if self.current_mode == 'initial': self.finish_initial_pass()
             else: self.finish_reprocess_pass()
             return
-        
         path = self.processing_queue[self.current_index]
         try:
             overlay, features = process_image_get_features(
                 path, self.cmb_method.currentText(), self.slider_manual.value(),
                 self.spin_adapt_bs.value(), self.spin_adapt_C.value())
         except Exception as e:
-            QMessageBox.critical(self, "Processing Error", f"An error occurred while processing the image: {path}\n\n{e}")
+            QMessageBox.critical(self, "Processing Error", f"Error processing image: {path}\n\n{e}")
             self.processed_files.append({'filename': os.path.basename(path), 'result': 'ERROR'})
-            self._log_processing_event('ERROR', path, error_msg=str(e)) # Log the error
+            self._log_processing_event('ERROR', path, error_msg=str(e))
             self.save_progress()
             self.next_index()
             return
         
-        # Display the image
         original = cv2.imread(path)
         self.label_original.setPixmap(cv2_to_qpixmap(original).scaled(self.label_original.size(), Qt.KeepAspectRatio))
         self.label_overlay.setPixmap(cv2_to_qpixmap(overlay).scaled(self.label_overlay.size(), Qt.KeepAspectRatio))
         self._last_processing = {'path': path, 'overlay_bgr': overlay, 'particle_features': features}
 
-        # Update status
         mode_str = "[Reprocess] " if self.current_mode == 'reprocess' else ""
         self.lbl_status.setText(f"{mode_str}{os.path.basename(path)} | Contours: {len(features)}")
         self.progress_label.setText(f"Progress: {self.current_index + 1}/{len(self.processing_queue)}")
         self.progress_bar.setValue(self.current_index + 1)
 
     def mark_ok_and_next(self):
-        """Handles the 'OK' button click. Saves the results and moves to the next image."""
         if not self.btn_ok.isEnabled() or not hasattr(self, '_last_processing'): return
         info = self._last_processing
         path, overlay, features = info['path'], info['overlay_bgr'], info['particle_features']
-        
-        # Log the OK event
         self._log_processing_event('OK', path, features=features)
-
         base_name = os.path.splitext(os.path.basename(path))[0]
         cols = ['perimeter', 'area', 'aspect_ratio', 'solidity', 'circularity'] + [f'hu{i+1}' for i in range(7)]
         df = pd.DataFrame(features, columns=cols) if features else pd.DataFrame(columns=cols)
-        
         csv_path = os.path.join(self.output_individual_csv_folder, f"{base_name}.csv")
         df.to_csv(csv_path, index=False)
         cv2.imwrite(os.path.join(self.output_overlay_folder, os.path.basename(path)), overlay)
-
-        # Append to the summary CSV file
         mean_features = df.mean().values.tolist() if not df.empty else [np.nan] * 12
         row = [os.path.basename(path)] + mean_features
         pd.DataFrame([row], columns=['filename']+cols).to_csv(self.summary_csv_path, mode='a', header=not os.path.exists(self.summary_csv_path), index=False)
-        
         self.processed_files.append({'filename': os.path.basename(path), 'result': 'OK'})
         self.save_progress()
         self.next_index()
 
     def mark_ng_and_next(self):
-        """Handles the 'NG' button click. Records the image in the NG list and moves on."""
         if not self.btn_ng.isEnabled() or not hasattr(self, '_last_processing'): return
         info = self._last_processing
-        path = info['path']
-        features = info.get('particle_features', [])
-
-        # Log the NG event
+        path, features = info['path'], info.get('particle_features', [])
         self._log_processing_event('NG', path, features=features)
-        
         if self.current_mode == 'initial': self.ng_list.append(path)
         else: self.reprocess_ng_list.append(path)
-            
         self.processed_files.append({'filename': os.path.basename(path), 'result': 'NG'})
         self.save_progress()
         self.next_index()
 
     def next_index(self):
-        """Increments the index and processes the next image."""
         self.current_index += 1
         self.process_and_show_current()
 
     def prev_image(self):
-        """Decrements the index to re-process the previous image."""
         if self.current_index > 0:
             self.current_index -= 1
-            # Remove the processing result of the previous image from the list
             if self.processed_files:
                 last_file = os.path.basename(self.processing_queue[self.current_index])
                 if self.processed_files[-1]['filename'] == last_file:
@@ -589,68 +547,71 @@ class PIPGui(QWidget):
             self.process_and_show_current()
 
     def next_image(self): 
-        """Handles the 'Next (as NG)' button click."""
         self.mark_ng_and_next()
 
     def _end_pass_ui_state(self):
-        """Sets the UI state when a pass (initial or reprocess) is completed."""
+        self.is_processing = False
         self.btn_ok.setEnabled(False); self.btn_ng.setEnabled(False); self.btn_prev.setEnabled(False); self.btn_next.setEnabled(False)
         self.btn_start.setEnabled(True)
         self.btn_start.setStyleSheet(self.original_start_button_style)
         self.folder_box.setEnabled(True)
-        self.progress_bar.setValue(len(self.processing_queue))
+        self.thresh_box.setEnabled(True)
+        if self.processing_queue:
+            self.progress_bar.setValue(len(self.processing_queue))
 
     def finish_initial_pass(self):
-        """Logic for when the initial pass is complete."""
         self._end_pass_ui_state()
         if self.ng_list:
-            msg = f"Initial processing complete. There are {len(self.ng_list)} NG images.\nPress 'Start / Resume' to begin reprocessing."
+            msg = f"Initial processing complete. {len(self.ng_list)} NG images found.\nPress 'Start / Resume' to reprocess them."
             self.lbl_status.setText("Initial pass complete. NG images found.")
             QMessageBox.information(self, "Initial Pass Complete", msg)
             self.save_progress()
         else:
-            QMessageBox.information(self, "Processing Complete", "Initial processing complete. There are no NG images.")
+            QMessageBox.information(self, "Processing Complete", "Initial processing complete. No NG images found.")
             self.lbl_status.setText("Processing Complete.")
             self.save_progress(completed=True)
 
     def finish_reprocess_pass(self):
-        """Logic for when a reprocessing pass is complete."""
         self._end_pass_ui_state()
         self.ng_list = list(self.reprocess_ng_list)
         self.reprocess_ng_list = []
         if self.ng_list:
             msg = f"Reprocessing complete. {len(self.ng_list)} NG images remain.\nPress 'Start / Resume' to reprocess them again."
-            self.lbl_status.setText("Reprocessing complete. Some NG images remain.")
+            self.lbl_status.setText("Reprocessing complete. NG images remain.")
             QMessageBox.information(self, "Reprocess Pass Complete", msg)
             self.save_progress()
         else:
-            QMessageBox.information(self, "Processing Complete", "Reprocessing complete. All images have been marked OK.")
+            QMessageBox.information(self, "Processing Complete", "Reprocessing complete. All images are now OK.")
             self.lbl_status.setText("Processing Complete.")
             self.save_progress(completed=True)
 
     def closeEvent(self, event):
-        """Handles the window close event. Shows a confirmation dialog if processing has been started."""
-        # A session is considered active if the output paths have been configured by starting the process.
-        if not self.processing_log_path:
-            event.accept()
-            return
-
-        progress_data = self.load_progress()
-        if progress_data and progress_data.get("status") == "Completed":
-            # If already marked as complete, no need to ask or save.
-            event.accept()
-            return
-            
-        reply = QMessageBox.question(self, 'Confirm Exit',
-            'Are you sure you want to exit?\nYour current progress will be saved.',
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-
-        if reply == QMessageBox.Yes:
-            # Always save as "In Progress" when exiting mid-session.
-            self.save_progress(completed=False)
-            event.accept()
+        """
+        This method is called when the user attempts to close the window.
+        It prevents exit during processing.
+        """
+        if self.is_processing:
+            # 終了不可の警告を表示（Yes/Noボタンなし）
+            QMessageBox.warning(
+                self,
+                "Processing in Progress",
+                "Processing is in progress.\nPlease complete current process."
+            )
+            event.ignore()  # 終了を無効化
         else:
-            event.ignore()
+            reply = QMessageBox.question(
+                self,
+                "Confirm Exit",
+                "Are you sure you want to exit the application?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+
+            if reply == QMessageBox.Yes:
+                event.accept()
+            else:
+                event.ignore()
+
 
 # ------------------ Main Execution Block ------------------
 def main():
