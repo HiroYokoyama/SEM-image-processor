@@ -1,11 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Particle Image Processor
-github.com/HiroYokoyama/particle-image-processor
-Dependencies: PyQt5, opencv-python (or opencv-python-headless), numpy, pandas, scikit-image (for some methods)
-"""
-
 import sys
 import os
 import glob
@@ -49,11 +41,12 @@ def process_image_get_features(img_path, threshold_method='otsu', manual_thresho
     img_blur = cv2.GaussianBlur(img_crop, (3,3), 0)
 
     # Binarization Process
+    thresh = None # Binarized image variable
     if threshold_method == 'otsu':
         _, thresh = cv2.threshold(img_blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     elif threshold_method == 'manual':
         _, thresh = cv2.threshold(img_blur, int(manual_threshold), 255, cv2.THRESH_BINARY)
-    elif SKIMAGE_AVAILABLE:
+    elif SKIMAGE_AVAILABLE and threshold_method in ['li', 'triangle', 'yen', 'isodata']:
         if threshold_method == 'li':
             thresh_val = threshold_li(img_blur)
         elif threshold_method == 'triangle':
@@ -62,12 +55,12 @@ def process_image_get_features(img_path, threshold_method='otsu', manual_thresho
             thresh_val = threshold_yen(img_blur)
         elif threshold_method == 'isodata':
             thresh_val = threshold_isodata(img_blur)
-        else:
-            raise ValueError(f"Unknown binarization method: {threshold_method}")
         _, thresh = cv2.threshold(img_blur, thresh_val, 255, cv2.THRESH_BINARY)
     elif threshold_method == 'adaptive':
         bs = int(adaptive_blocksize)
-        bs = bs + 1 if bs % 2 == 0 else bs
+        # Ensure block size is odd and at least 3, as required by OpenCV.
+        if bs % 2 == 0:
+            bs += 1
         bs = max(3, bs)
         thresh = cv2.adaptiveThreshold(img_blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
                                        cv2.THRESH_BINARY, bs, int(adaptive_C))
@@ -224,8 +217,11 @@ class PIPGui(QWidget):
         thresh_box = QGroupBox("Binarization Settings")
         thresh_layout = QFormLayout()
         self.cmb_method = QComboBox()
-        items = ['otsu', 'manual', 'adaptive']
-        if SKIMAGE_AVAILABLE: items.extend(['li', 'triangle', 'yen', 'isodata'])
+        # Modified list order: otsu first, then scikit-image, then manual and adaptive
+        items = ['otsu']
+        if SKIMAGE_AVAILABLE:
+            items.extend(['li', 'triangle', 'yen', 'isodata'])
+        items.extend(['manual', 'adaptive'])
         self.cmb_method.addItems(items)
         self.cmb_method.currentIndexChanged.connect(self.update_param_fields)
         thresh_layout.addRow("Method:", self.cmb_method)
@@ -640,4 +636,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-    
